@@ -1,0 +1,10 @@
+Files changed from origin/main baseline:
+artifacts/api-server/src/middlewares/error-handler.ts
+artifacts/api-server/src/routes/accounts.create.test.ts
+
+Working tree status:
+ M artifacts/api-server/src/middlewares/error-handler.ts
+ M artifacts/api-server/src/routes/accounts.create.test.ts
+?? reports/ps03d5-3-final-error-contract-manifest.txt
+?? reports/ps03d5-3-final-error-contract.diff
+?? screenshots/playsyncer-ps03d5-3-f1-smoke.jpg

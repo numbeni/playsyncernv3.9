@@ -88,7 +88,7 @@ export function errorHandler(
     "type" in err &&
     (err as { type?: unknown }).type === "entity.parse.failed"
   ) {
-    res.status(400).json({ error: "Malformed JSON body" });
+    res.status(400).json({ error: "Invalid JSON request body", code: "INVALID_JSON" });
     return;
   }
 
@@ -104,5 +104,5 @@ export function errorHandler(
   }
 
   logger.error(err, "Unhandled error");
-  res.status(500).json({ error: "Internal server error" });
+  res.status(500).json({ error: "Internal server error", code: "INTERNAL_ERROR" });
 }

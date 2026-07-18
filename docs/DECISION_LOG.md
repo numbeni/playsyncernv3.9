@@ -1199,6 +1199,14 @@ PS-03D5-3 — Create Account Backend, Runtime Disabled (awaiting Command Center 
 - Next authorized sub-stage is PS-03D5-4 — Update and Status Override Backend, Runtime Disabled.
 - Runtime activation of Account mutations remains deferred to PS-03D7.
 
+### PS-03D5-3-F1 Final Error Contract Correction
+
+- The centralized error handler (`artifacts/api-server/src/middlewares/error-handler.ts`) was corrected so that any unexpected error returns HTTP 500 with `{ error: "Internal server error", code: "INTERNAL_ERROR" }` and never leaks raw exceptions, stack traces, SQL details, or configuration values.
+- Malformed JSON request bodies now return HTTP 400 with `{ error: "Invalid JSON request body", code: "INVALID_JSON" }`. Detection remains limited to actual Express `body-parser` `SyntaxError` (`type === "entity.parse.failed"`), so existing Zod validation behavior is unchanged.
+- Additional focused tests prove malformed JSON performs zero Account, Capacity, and Backup Code writes; prove unexpected errors return 500 with no internal details; and re-confirm the existing public-route 403, test-only 201, duplicate-warning 409, and body-`gameId` 400 behaviors.
+- Final validation: API server 98/98 tests pass, DB helper 16/16 tests pass, DB migration 38/38 tests pass, frontend 47/47 tests pass, typecheck and production builds pass, `git diff --check` passes.
+- Closure package: `playsyncer-ps03d5-3-closed.zip` is the canonical complete-source package; no review ZIPs, screenshots, prompt artifacts, or temporary files are included in the final commit.
+
 ### Stage boundary
 
 - PS-03D5-3 is closed.

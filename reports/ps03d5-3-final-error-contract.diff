@@ -1,0 +1,88 @@
+diff --git a/artifacts/api-server/src/middlewares/error-handler.ts b/artifacts/api-server/src/middlewares/error-handler.ts
+index 10cb82d..2a1a1b9 100644
+--- a/artifacts/api-server/src/middlewares/error-handler.ts
++++ b/artifacts/api-server/src/middlewares/error-handler.ts
+@@ -88,7 +88,7 @@ export function errorHandler(
+     "type" in err &&
+     (err as { type?: unknown }).type === "entity.parse.failed"
+   ) {
+-    res.status(400).json({ error: "Malformed JSON body" });
++    res.status(400).json({ error: "Invalid JSON request body", code: "INVALID_JSON" });
+     return;
+   }
+ 
+@@ -104,5 +104,5 @@ export function errorHandler(
+   }
+ 
+   logger.error(err, "Unhandled error");
+-  res.status(500).json({ error: "Internal server error" });
++  res.status(500).json({ error: "Internal server error", code: "INTERNAL_ERROR" });
+ }
+diff --git a/artifacts/api-server/src/routes/accounts.create.test.ts b/artifacts/api-server/src/routes/accounts.create.test.ts
+index 98ee23f..82bce7f 100644
+--- a/artifacts/api-server/src/routes/accounts.create.test.ts
++++ b/artifacts/api-server/src/routes/accounts.create.test.ts
+@@ -364,6 +364,25 @@ describe("Create Account handler", () => {
+     assert.strictEqual(res.status, 400);
+   });
+ 
++  it("malformed JSON body returns HTTP 400 INVALID_JSON and performs zero writes", async () => {
++    const game = await createGame("Malformed JSON Body", "PS5_ONLY");
++    const before = await getRowCounts();
++    const res = await fetch(testUrl(game.id), {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: '{"psnEmail": "broken',
++    });
++    assert.strictEqual(res.status, 400);
++    const data = (await res.json()) as { error: string; code: string };
++    assert.strictEqual(data.error, "Invalid JSON request body");
++    assert.strictEqual(data.code, "INVALID_JSON");
++
++    const after = await getRowCounts();
++    assert.strictEqual(after.accounts, before.accounts);
++    assert.strictEqual(after.capacities, before.capacities);
++    assert.strictEqual(after.backupCodes, before.backupCodes);
++  });
++
+   it("body gameId is rejected as an unexpected field with zero writes", async () => {
+     const game = await createGame("Body GameId Rejected", "PS5_ONLY");
+     const otherGame = await createGame("Other Game Body GameId", "PS5_ONLY");
+@@ -517,6 +536,37 @@ describe("Create Account handler", () => {
+     }
+   });
+ 
++  it("unexpected error in the create account route returns 500 INTERNAL_ERROR and hides details", async () => {
++    const app = express();
++    app.use(express.json());
++    app.post("/games/:gameId/accounts", () => {
++      throw new Error("secret database password: xyzzy-stack-trace");
++    });
++    app.use(errorHandler);
++    const port = await getFreePort();
++    const server = app.listen(port);
++    try {
++      const game = await createGame("Unexpected Error Game", "PS5_ONLY");
++      const res = await fetch(`http://localhost:${port}/games/${game.id}/accounts`, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify(validRequest()),
++      });
++      assert.strictEqual(res.status, 500);
++      const data = (await res.json()) as { error: string; code: string };
++      assert.strictEqual(data.error, "Internal server error");
++      assert.strictEqual(data.code, "INTERNAL_ERROR");
++      const body = JSON.stringify(data).toLowerCase();
++      assert.ok(!body.includes("secret"), "response leaks secret detail");
++      assert.ok(!body.includes("password"), "response leaks password detail");
++      assert.ok(!body.includes("xyzzy"), "response leaks stack marker");
++      assert.ok(!body.includes("stack"), "response leaks stack detail");
++      assert.ok(!body.includes("database"), "response leaks database detail");
++    } finally {
++      server.close();
++    }
++  });
++
+   it("forced database failure rolls back Account, Capacities, and Backup Codes", async () => {
+     const game = await createGame("Rollback Game", "PS5_ONLY");
+     const before = await getRowCounts();
