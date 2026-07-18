@@ -1,0 +1,63 @@
+PS-03D4 Closure Package Manifest
+================================
+
+Package: playsyncer-ps03d4-closed.zip
+Closure commit: 0f3c9190b3c9c343d470d4053912a84cf5564345
+Initial implementation commits:
+  - e8f4bbf Implement account card display and expand game details page with API error handling
+  - 9e13e99 Refactor account components and add capacity kind badge with domain model
+
+Included top-level directories
+------------------------------
+- .agents
+- artifacts
+- docs
+- fixtures
+- lib
+- reports
+- screenshots
+- scripts
+- package files (package.json, pnpm-workspace.yaml, etc.)
+
+Key included source files
+-------------------------
+- artifacts/playsyncer/src/components/AccountCardReadOnly.tsx
+- artifacts/playsyncer/src/components/AccountDetailsReadOnly.tsx
+- artifacts/playsyncer/src/components/AccountStatusBadge.tsx
+- artifacts/playsyncer/src/components/CapacityKindBadge.tsx
+- artifacts/playsyncer/src/domain/accounts/capacityKind.ts
+- artifacts/playsyncer/src/pages/GameDetailPage.tsx
+- artifacts/playsyncer/src/lib/apiErrors.ts
+- artifacts/api-server/ (backend routes and services)
+- lib/api-spec/ (OpenAPI and generated clients)
+- lib/db/ (schema and migrations)
+
+Documentation
+-------------
+- docs/CURRENT_PHASE.md
+- docs/DECISION_LOG.md
+- reports/ps03d4-closure-report.md
+- reports/ps03d4-closure-manifest.txt
+
+Evidence
+--------
+- screenshots/ps03d4-final-list-desktop.jpg
+- screenshots/ps03d4-final-capacities-desktop.jpg
+- screenshots/ps03d4-final-details-desktop.jpg
+- screenshots/ps03d4-final-mobile.jpg
+- screenshots/ps03d4-final-empty-state.jpg
+- screenshots/ps03d4-final-error-retry.jpg
+
+Excluded
+--------
+- .git
+- node_modules
+- dist / build / coverage
+- *.tsbuildinfo
+- pgdata / temporary PostgreSQL data
+- .env / .env.*
+- attached_assets/Pasted-*
+- old ZIP archives and previous source-review packages
+- misleading old PS-03D4 screenshots
+- temporary forced-state or debugging files
+- logs and PID files

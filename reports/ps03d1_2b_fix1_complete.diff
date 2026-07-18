@@ -1,0 +1,276 @@
+diff --git a/artifacts/api-server/src/services/account/index.test.ts b/artifacts/api-server/src/services/account/index.test.ts
+index bb88528..23f5cf1 100644
+--- a/artifacts/api-server/src/services/account/index.test.ts
++++ b/artifacts/api-server/src/services/account/index.test.ts
+@@ -679,4 +679,89 @@ describe("Account Domain Service", () => {
+       "per-game sequence is not reused after deletion",
+     );
+   });
++
++  it("invalid birth dates do not throw RangeError", async () => {
++    const game = await createGame("Birth Date RangeError", "PS5_ONLY");
++    const badDates = [
++      "2026-02-31",
++      "2026-99-99",
++      "0000-00-00",
++      "2021-02-29",
++    ];
++
++    for (const birthDate of badDates) {
++      let thrown: unknown;
++      try {
++        await accountService.createAccount(validInput(game.id, { birthDate }));
++      } catch (err) {
++        thrown = err;
++      }
++      assert.ok(thrown instanceof Error, `expected error for ${birthDate}`);
++      assert.ok(
++        !(thrown instanceof RangeError),
++        `RangeError thrown for ${birthDate}`,
++      );
++      assert.ok(zodError(thrown), `expected ZodError for ${birthDate}`);
++    }
++  });
++
++  it("returns IdentifierConflictError when forced per-game sequence collision occurs", async () => {
++    const game = await createGame("Identifier Conflict", "PS5_ONLY");
++    const first = await accountService.createAccount(validInput(game.id));
++    assert.strictEqual(first.kind, "created");
++    if (first.kind !== "created") return;
++
++    const before = await getRowCounts();
++
++    // Force the per-game counter back so the next account collides with the existing one.
++    await db.db
++      .update(db.gameAccountSequencesTable)
++      .set({ lastValue: 0 })
++      .where(eq(db.gameAccountSequencesTable.gameId, game.id));
++
++    try {
++      await assert.rejects(
++        accountService.createAccount(
++          validInput(game.id, {
++            psnEmail: "conflict-second@example.com",
++            onlineId: "ConflictSecond",
++            familyManagementEmail: "conflict-second-fam@example.com",
++          }),
++        ),
++        accountService.IdentifierConflictError,
++      );
++    } finally {
++      // Restore the counter so this isolated game does not surprise later tests.
++      await db.db
++        .update(db.gameAccountSequencesTable)
++        .set({ lastValue: 1 })
++        .where(eq(db.gameAccountSequencesTable.gameId, game.id));
++    }
++
++    const after = await getRowCounts();
++    assert.strictEqual(after.accounts, before.accounts, "no partial account");
++    assert.strictEqual(
++      after.capacities,
++      before.capacities,
++      "no partial capacities",
++    );
++    assert.strictEqual(
++      after.backupCodes,
++      before.backupCodes,
++      "no partial backup codes",
++    );
++  });
++
++  it("duplicate advisory lock tokens do not cause incorrect behavior", async () => {
++    const game = await createGame("Duplicate Lock Tokens", "PS5_ONLY");
++    const sharedEmail = "shared@example.com";
++    const result = await accountService.createAccount({
++      ...validInput(game.id),
++      psnEmail: sharedEmail,
++      familyManagementEmail: sharedEmail,
++    });
++    assert.strictEqual(result.kind, "created");
++    if (result.kind !== "created") return;
++    assert.strictEqual(result.account.birthDate, "1990-01-01");
++  });
+ });
+diff --git a/artifacts/api-server/src/services/account/index.ts b/artifacts/api-server/src/services/account/index.ts
+index c350eca..e622fd8 100644
+--- a/artifacts/api-server/src/services/account/index.ts
++++ b/artifacts/api-server/src/services/account/index.ts
+@@ -33,12 +33,6 @@ export class GameNotFoundError extends AccountDomainError {
+   }
+ }
+ 
+-export class ValidationError extends AccountDomainError {
+-  constructor(message: string) {
+-    super(message);
+-  }
+-}
+-
+ export class InactiveGameError extends AccountDomainError {
+   constructor() {
+     super("Cannot create an account for an inactive game");
+@@ -76,16 +70,35 @@ const backupCodeSchema = z.preprocess(
+   z.string().min(1, "Backup code cannot be empty"),
+ );
+ 
++function isValidBirthDate(value: string): boolean {
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
++    return false;
++  }
++  const [year, month, day] = value.split("-").map(Number);
++  if (
++    year < 1 ||
++    year > 9999 ||
++    month < 1 ||
++    month > 12 ||
++    day < 1 ||
++    day > 31
++  ) {
++    return false;
++  }
++  const date = new Date(Date.UTC(year, month - 1, day));
++  return (
++    date.getUTCFullYear() === year &&
++    date.getUTCMonth() + 1 === month &&
++    date.getUTCDate() === day
++  );
++}
++
+ const birthDateSchema = z
+   .string()
+-  .regex(
+-    /^\d{4}-\d{2}-\d{2}$/,
+-    "birthDate must be in YYYY-MM-DD format",
+-  )
+-  .refine((value) => {
+-    const date = new Date(value);
+-    return date.toISOString().slice(0, 10) === value;
+-  }, "birthDate must be a real calendar date");
++  .refine(
++    isValidBirthDate,
++    "birthDate must be a real calendar date in YYYY-MM-DD format",
++  );
+ 
+ export const CreateAccountInput = z
+   .object({
+@@ -228,9 +241,11 @@ async function acquireDuplicateLocks(
+     ),
+   ];
+ 
+-  tokens.sort((a, b) => (a < b ? -1 : 1));
++  const uniqueLockIds = [...new Set(tokens)].sort((a, b) =>
++    a < b ? -1 : a > b ? 1 : 0,
++  );
+ 
+-  for (const lockId of tokens) {
++  for (const lockId of uniqueLockIds) {
+     await client.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
+   }
+ }
+@@ -432,13 +447,22 @@ export function formatAccountCode(seq: number): string {
+   return `ACC-${String(seq).padStart(6, "0")}`;
+ }
+ 
+-function isUniqueViolation(err: unknown): boolean {
+-  const candidate = err as { code?: string; constraint?: string };
+-  return (
+-    candidate.code === "23505" &&
+-    !!candidate.constraint &&
+-    ACCOUNT_IDENTIFIER_CONSTRAINTS.includes(candidate.constraint)
+-  );
++function hasIdentifierUniqueViolation(err: unknown): boolean {
++  const seen = new Set<unknown>();
++  let current: unknown = err;
++  while (current && !seen.has(current)) {
++    seen.add(current);
++    const candidate = current as { code?: string; constraint?: string };
++    if (
++      candidate.code === "23505" &&
++      candidate.constraint &&
++      ACCOUNT_IDENTIFIER_CONSTRAINTS.includes(candidate.constraint)
++    ) {
++      return true;
++    }
++    current = (current as { cause?: unknown }).cause;
++  }
++  return false;
+ }
+ 
+ export async function createAccount(
+@@ -485,7 +509,7 @@ export async function createAccount(
+       await insertBackupCodes(client, account.id, parsed.backupCodes, keys);
+       return { kind: "created", account: toSafeAccount(account) };
+     } catch (err) {
+-      if (isUniqueViolation(err)) {
++      if (hasIdentifierUniqueViolation(err)) {
+         throw new IdentifierConflictError();
+       }
+       throw err;
+diff --git a/docs/CURRENT_PHASE.md b/docs/CURRENT_PHASE.md
+index f639bcc..0ee7c82 100644
+--- a/docs/CURRENT_PHASE.md
++++ b/docs/CURRENT_PHASE.md
+@@ -18,16 +18,16 @@ PS-03D1 — Account Domain Core
+ 
+ ## Current Sub-stage
+ 
+-PS-03D1-2B — Account Domain Core Corrections and Hardening
++PS-03D1-2B-Fix1 — Final Correctness Corrections
+ 
+ ## Current Status
+ 
+-PS-03D1-2B — HARDENING COMPLETE, AWAITING COMMAND CENTER REVIEW
++PS-03D1-2B-Fix1 — COMPLETE, AWAITING COMMAND CENTER REVIEW
+ 
+ ## Input Baseline
+ 
+ - Command Center has accepted the current workspace as the working baseline; the missing commit `a78514e` is not required.
+-- PS-03D1-2A implementation (commit `0ab031d`) is the starting point for hardening.
++- PS-03D1-2A implementation (commit `0ab031d`) is the starting point for hardening, and PS-03D1-2B corrections are the basis for Fix1.
+ 
+ Previous completed stage:
+ 
+@@ -71,19 +71,15 @@ These decisions define:
+ 
+ ## Current Objective
+ 
+-PS-03D1-2A was implemented in commit `0ab031d`. PS-03D1-2B hardening corrections have been applied as uncommitted working-tree changes. The Account Domain Service now:
++PS-03D1-2B-Fix1 final correctness corrections have been applied to the Account Domain Service and its tests. The service now:
+ 
+-- locks the selected Game row with `FOR UPDATE` during Account creation
+-- uses stable-order transaction-level advisory locks before duplicate checks to make concurrent identical requests safe
+-- trims/lowercases emails, trims Online ID, rejects empty Online IDs, and validates real calendar dates
+-- trims and rejects empty Backup Codes before the transaction begins
+-- validates canonical Base64 for `PLAYSYNCER_ACCOUNT_MASTER_KEY`
+-- converts PostgreSQL unique violations on approved Account identifier constraints into `IdentifierConflictError`
+-- removes unused service code and imports
+-- tests decryption of stored credentials and Backup Codes, strict input validation, exact capacity tuples, and concurrency safety
+-- verifies rollback of Account, Capacities, and per-game sequence increase via a temporary database trigger on the disposable test database
++- validates `birthDate` safely: it checks the exact `YYYY-MM-DD` format, parses year, month, and day, and confirms that the resulting UTC date matches all three original values, so invalid dates like `2026-02-31`, `2026-99-99`, `0000-00-00`, and `2021-02-29` produce a normal Zod error without throwing `RangeError`
++- converts only approved PostgreSQL unique violations (code `23505` on `accounts_account_code_unique`, `accounts_game_seq_unique`, or `accounts_game_display_unique`) into `IdentifierConflictError`, inspecting both the top-level error and any nested `error.cause` values
++- acquires duplicate-check advisory locks in stable ascending order with `0` for equal IDs and removes duplicate lock IDs before calling `pg_advisory_xact_lock`
++- has no remaining unused `ValidationError` class
++- is covered by regression tests for safe birth-date validation, real `IdentifierConflictError` behavior on a disposable database, and correct handling of duplicate advisory-lock tokens
+ 
+-Await Command Center review of the hardened implementation before proceeding to Account routes, OpenAPI, generated clients, Secret Reveal, or Customer Assignment.
++Await Command Center review of the Fix1 corrections before proceeding to the PS-03D1-3 final review, commit, and Account Domain Core closure.
+ 
+ ## Restrictions
+ 
+@@ -97,7 +93,7 @@ During this review gate:
+ - do not implement Customer Assignment
+ - do not modify the database schema or migrations
+ - do not run migrations or use `drizzle-kit push`
+-- do not commit the PS-03D1-2B changes
++- do not commit the PS-03D1-2B-Fix1 changes
+ - keep the disabled Account route safety tests passing
+ 
+ Only documentation, phase-transition bookkeeping, and review-fixes authorized by Command Center are permitted.
+@@ -108,4 +104,6 @@ Only documentation, phase-transition bookkeeping, and review-fixes authorized by
+ 
+ ## Next Gate
+ 
+-Command Center approval to proceed from PS-03D1-2B to PS-03D1-2C (Account routes and OpenAPI) or to close PS-03D1.
++PS-03D1-3 — Final Review, Commit and Account Domain Core Closure.
++
++Account routes, OpenAPI, generated clients, and frontend wiring remain later stages after PS-03D1 is closed.

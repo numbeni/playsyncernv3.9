@@ -1,0 +1,3 @@
+- [Database migrations on import](db-migrations-on-import.md) — After importing this project, pnpm install and `pnpm --filter @workspace/db run db:migrate` are both required before the API server can serve `/api/games`.
+- [One-command project setup](setup-script.md) — `scripts/setup.sh` now bundles dependency install, shared-lib TS build, and DB migrations for fresh imports; `post-merge.sh` also builds shared libs after merges.
+- [Generated hook query options](generated-hook-query-options.md) — When overriding Orval-generated React Query options, also pass `queryKey` from the matching helper or TypeScript reports it as required.

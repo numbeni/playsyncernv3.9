@@ -1,0 +1,20 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "Lhy2qbBDus7tKRA0cXTaQ"
+uri = "file://screenshots/ps03d4-game-detail.jpg"
+type = "image"
+title = "PS-03D4-1 Game Detail Page with Account List"
+
+[[outputs]]
+id = "nHVvE1MO3CbRegw6Ja_Zy"
+uri = "file://playsyncer-ps03d5-2-frontend-test-foundation-review.zip"
+type = "unspecified"
+title = "PS-03D5-2 Frontend Test Foundation Complete Source Review Package"
+
+[[outputs]]
+id = "IcMnR96HNncBooCELykso"
+uri = "file://playsyncer-ps03d5-2-closed.zip"
+type = "unspecified"
+title = "PS-03D5-2 Frontend Test Foundation — Closed"

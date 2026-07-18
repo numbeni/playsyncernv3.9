@@ -1,0 +1,1176 @@
+diff --git a/.agents/memory/MEMORY.md b/.agents/memory/MEMORY.md
+deleted file mode 100644
+index 9e48dbd..0000000
+--- a/.agents/memory/MEMORY.md
++++ /dev/null
+@@ -1 +0,0 @@
+-- [Node TypeScript ESM imports](node-ts-esm-imports.md) — relative imports must use `.ts` extensions and avoid parameter properties in `node --test` strip-only mode.
+\ No newline at end of file
+diff --git a/.agents/memory/node-ts-esm-imports.md b/.agents/memory/node-ts-esm-imports.md
+deleted file mode 100644
+index c5c79c4..0000000
+--- a/.agents/memory/node-ts-esm-imports.md
++++ /dev/null
+@@ -1,25 +0,0 @@
+----
+-name: Node TypeScript ESM imports in this project
+-description: How `node --test` strip-only mode handles TypeScript imports and what syntax it rejects.
+----
+-
+-This project runs TypeScript tests directly with `node --test` (Node's built-in TypeScript loader in strip-only mode). It is **not** a full `tsc` compilation step.
+-
+-**Rule:** Relative imports must include the `.ts` extension, even when the target is a TypeScript file.
+-
+-- `import "./foo"` fails with `ERR_MODULE_NOT_FOUND` or `ERR_UNSUPPORTED_DIR_IMPORT`.
+-- `import "./foo.ts"` resolves correctly.
+-- Directory imports (e.g., `import * as schema from "./schema"`) are not supported; use `import * as schema from "./schema/index.ts"` instead.
+-
+-**Rule:** Avoid TypeScript-only class syntax that strip-only mode cannot erase.
+-
+-- Parameter properties in constructors are rejected: `constructor(public readonly x: string) {}` throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
+-- Use an explicit property declaration and assignment inside the constructor instead.
+-
+-**Why this matters:** The production build uses esbuild, which hides these issues. Service tests that import `@workspace/db` or other workspace packages directly under `node --test` will hit the strict ESM resolution rules. We had to add `.ts` extensions to all relative imports in `lib/db/src/schema/*.ts` and `lib/db/src/helpers/index.ts` so the DB package could be loaded by the Node TypeScript loader.
+-
+-**How to apply:**
+-
+-- When writing new service tests or any file that may run under `node --test`, always use `.ts` extensions for relative imports and for dynamic imports (`await import("./index.ts")`).
+-- Do not rely on esbuild's loose resolution in test-only code.
+-- Keep constructors compatible with strip-only mode if the class lives in code loaded by the test runner.
+\ No newline at end of file
+diff --git a/artifacts/api-server/src/services/account/index.test.ts b/artifacts/api-server/src/services/account/index.test.ts
+index f7ac833..bb88528 100644
+--- a/artifacts/api-server/src/services/account/index.test.ts
++++ b/artifacts/api-server/src/services/account/index.test.ts
+@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
+ import assert from "node:assert";
+ import { eq, sql } from "drizzle-orm";
+ import { startTestPg } from "../../lib/test-pg.ts";
++import { decrypt, encrypt } from "../../lib/crypto.ts";
+ 
+ let databaseUrl: string;
+ let stopPg: () => Promise<void>;
+@@ -128,6 +129,43 @@ async function getBackupCodes(accountId: string) {
+     .where(eq(db.accountBackupCodesTable.accountId, accountId));
+ }
+ 
++async function getAccountCodeSeqValue(): Promise<number> {
++  const result = (await db.db.execute(
++    sql`SELECT last_value FROM account_code_seq`,
++  )) as { rows: { last_value: number }[] };
++  return Number(result.rows[0].last_value);
++}
++
++async function createBackupCodeRejectTrigger() {
++  await db.db.execute(sql`
++    CREATE OR REPLACE FUNCTION reject_account_backup_code_insert()
++    RETURNS trigger AS $$
++    BEGIN
++      RAISE EXCEPTION 'account backup code insert rejected by test trigger';
++    END;
++    $$ LANGUAGE plpgsql;
++  `);
++  await db.db.execute(sql`
++    CREATE TRIGGER reject_account_backup_code_insert_trg
++    BEFORE INSERT ON account_backup_codes
++    FOR EACH STATEMENT
++    EXECUTE FUNCTION reject_account_backup_code_insert();
++  `);
++}
++
++async function dropBackupCodeRejectTrigger() {
++  await db.db.execute(sql`
++    DROP TRIGGER IF EXISTS reject_account_backup_code_insert_trg ON account_backup_codes;
++  `);
++  await db.db.execute(sql`
++    DROP FUNCTION IF EXISTS reject_account_backup_code_insert();
++  `);
++}
++
++function zodError(err: unknown): boolean {
++  return err instanceof Error && (err as Error).name === "ZodError";
++}
++
+ describe("Account Domain Service", () => {
+   it("creates a valid account", async () => {
+     const game = await createGame("Valid", "PS5_ONLY");
+@@ -144,95 +182,73 @@ describe("Account Domain Service", () => {
+     assert.strictEqual(result.account.birthDate, "1990-01-01");
+   });
+ 
+-  it("creates correct capacity rows for all three platforms", async () => {
+-    const ps5Game = await createGame("PS5", "PS5_ONLY");
+-    const ps5Result = await accountService.createAccount(
+-      validInput(ps5Game.id),
+-    );
+-    assert.strictEqual(ps5Result.kind, "created");
+-    if (ps5Result.kind !== "created") return;
+-    const ps5Capacities = await getCapacities(ps5Result.account.id);
+-    assert.strictEqual(ps5Capacities.length, 3);
+-    assert.deepStrictEqual(
+-      ps5Capacities.map((c) => c.capacityKindV2).sort(),
+-      ["Z2_PS5", "Z2_PS5", "Z3_SHARED_PS5_PS4"].sort(),
+-    );
+-
+-    const bothGame = await createGame("Both", "PS4_AND_PS5");
+-    const bothResult = await accountService.createAccount(
+-      validInput(bothGame.id),
+-    );
+-    assert.strictEqual(bothResult.kind, "created");
+-    if (bothResult.kind !== "created") return;
+-    const bothCapacities = await getCapacities(bothResult.account.id);
+-    assert.strictEqual(bothCapacities.length, 4);
+-    assert.deepStrictEqual(
+-      bothCapacities.map((c) => c.capacityKindV2).sort(),
+-      ["Z2_PS4", "Z2_PS5", "Z2_PS5", "Z3_SHARED_PS5_PS4"].sort(),
+-    );
++  it("trims and lowercases emails for storage", async () => {
++    const game = await createGame("Email Normalize", "PS5_ONLY");
++    const input = validInput(game.id, {
++      psnEmail: "  Upper@Example.com  ",
++      familyManagementEmail: "  Family@Example.com  ",
++    });
++    const result = await accountService.createAccount(input);
++    assert.strictEqual(result.kind, "created");
++    if (result.kind !== "created") return;
+ 
+-    const ps4Game = await createGame("PS4", "PS4_ONLY");
+-    const ps4Result = await accountService.createAccount(
+-      validInput(ps4Game.id),
++    const account = await getAccountByGameId(game.id);
++    assert.ok(account);
++    const keys = accountService.loadAccountMasterKey();
++    assert.strictEqual(
++      decrypt(account!.psnEmailEncrypted as string, keys.encryptionKey),
++      "upper@example.com",
+     );
+-    assert.strictEqual(ps4Result.kind, "created");
+-    if (ps4Result.kind !== "created") return;
+-    const ps4Capacities = await getCapacities(ps4Result.account.id);
+-    assert.strictEqual(ps4Capacities.length, 2);
+-    assert.deepStrictEqual(
+-      ps4Capacities.map((c) => c.capacityKindV2).sort(),
+-      ["Z2_PS4", "Z3_SHARED_PS5_PS4"].sort(),
++    assert.strictEqual(
++      decrypt(
++        account!.familyManagementEmailEncryptedV2 as string,
++        keys.encryptionKey,
++      ),
++      "family@example.com",
+     );
+   });
+ 
+-  it("keeps shared Z3 capacity instanceNo = 0", async () => {
+-    const game = await createGame("Z3", "PS5_ONLY");
+-    const result = await accountService.createAccount(validInput(game.id));
++  it("trims Online ID but preserves its entered case", async () => {
++    const game = await createGame("Online ID Case", "PS5_ONLY");
++    const result = await accountService.createAccount(
++      validInput(game.id, { onlineId: "  MixedCaseOnline  " }),
++    );
+     assert.strictEqual(result.kind, "created");
+     if (result.kind !== "created") return;
+-    const capacities = await getCapacities(result.account.id);
+-    const shared = capacities.find(
+-      (c) => c.capacityKindV2 === "Z3_SHARED_PS5_PS4",
+-    );
+-    assert.ok(shared);
+-    assert.strictEqual(shared!.instanceNo, 0);
+-  });
+ 
+-  it("formats global and per-game identifiers without reuse", async () => {
+-    const game = await createGame("Identifiers", "PS5_ONLY");
+-    const firstInput = validInput(game.id);
+-    const first = await accountService.createAccount(firstInput);
+-    const second = await accountService.createAccount(
+-      validInput(game.id, {
+-        psnEmail: "second-identifier@example.com",
+-        onlineId: "SecondIdentifier",
+-        familyManagementEmail: "second-family@example.com",
+-      }),
+-    );
++    assert.strictEqual(result.account.onlineId, "MixedCaseOnline");
++    const account = await getAccountByGameId(game.id);
++    assert.strictEqual(account!.onlineId, "MixedCaseOnline");
++  });
+ 
+-    assert.strictEqual(first.kind, "created");
+-    assert.strictEqual(second.kind, "created");
+-    if (first.kind !== "created" || second.kind !== "created") return;
++  it("rejects invalid birth date formats and impossible dates", async () => {
++    const game = await createGame("Birth Date", "PS5_ONLY");
+ 
+-    assert.match(first.account.accountCode, /^ACC-\d{6}$/);
+-    assert.match(second.account.accountCode, /^ACC-\d{6}$/);
+-    assert.ok(
+-      first.account.accountCode < second.account.accountCode,
+-      "global codes must increase",
++    await assert.rejects(
++      accountService.createAccount(
++        validInput(game.id, { birthDate: "1990/01/01" }),
++      ),
++      zodError,
++    );
++    await assert.rejects(
++      accountService.createAccount(
++        validInput(game.id, { birthDate: "2026-02-31" }),
++      ),
++      zodError,
++    );
++    await assert.rejects(
++      accountService.createAccount(
++        validInput(game.id, { birthDate: "2021-02-29" }),
++      ),
++      zodError,
+     );
+ 
+-    const firstParts = first.account.displayNumber.split("-");
+-    const firstSeq = firstParts.pop();
+-    const firstPrefix = firstParts.join("-");
+-
+-    const secondParts = second.account.displayNumber.split("-");
+-    const secondSeq = secondParts.pop();
+-    const secondPrefix = secondParts.join("-");
+-
+-    assert.strictEqual(firstSeq, "001");
+-    assert.strictEqual(secondSeq, "002");
+-    assert.strictEqual(firstPrefix, secondPrefix);
+-    assert.notStrictEqual(first.account.id, second.account.id);
++    const valid = await accountService.createAccount(
++      validInput(game.id, { birthDate: "2020-02-29" }),
++    );
++    assert.strictEqual(valid.kind, "created");
++    if (valid.kind !== "created") return;
++    assert.strictEqual(valid.account.birthDate, "2020-02-29");
+   });
+ 
+   it("rejects empty or whitespace-only backup codes", async () => {
+@@ -241,31 +257,19 @@ describe("Account Domain Service", () => {
+ 
+     await assert.rejects(
+       accountService.createAccount(validInput(game.id, { backupCodes: [] })),
+-      (err: unknown) =>
+-        err instanceof Error && (err as Error).name === "ZodError",
++      zodError,
+     );
+ 
+     await assert.rejects(
+       accountService.createAccount(
+         validInput(game.id, { backupCodes: ["   "] }),
+       ),
+-      accountService.ValidationError,
++      zodError,
+     );
+ 
+     await assertNoNewRows(before);
+   });
+ 
+-  it("rejects invalid birth date format", async () => {
+-    const game = await createGame("Birth Date", "PS5_ONLY");
+-    await assert.rejects(
+-      accountService.createAccount(
+-        validInput(game.id, { birthDate: "1990/01/01" }),
+-      ),
+-      (err: unknown) =>
+-        err instanceof Error && (err as Error).name === "ZodError",
+-    );
+-  });
+-
+   it("rejects account creation for an inactive game", async () => {
+     const game = await createGame("Inactive", "PS5_ONLY", "INACTIVE");
+     await assert.rejects(
+@@ -274,6 +278,17 @@ describe("Account Domain Service", () => {
+     );
+   });
+ 
++  it("rejects statusOverride through strict input contract", async () => {
++    const game = await createGame("Status Override", "PS5_ONLY");
++    await assert.rejects(
++      accountService.createAccount({
++        ...validInput(game.id),
++        statusOverride: "SOLD",
++      }),
++      zodError,
++    );
++  });
++
+   it("fails closed when PLAYSYNCER_ACCOUNT_MASTER_KEY is missing or invalid", async () => {
+     const original = process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
+     const game = await createGame("Missing Key", "PS5_ONLY");
+@@ -290,9 +305,7 @@ describe("Account Domain Service", () => {
+       accountService.EncryptionError,
+     );
+ 
+-    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = Buffer.from("short").toString(
+-      "base64",
+-    );
++    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = "abcd";
+     await assert.rejects(
+       accountService.createAccount(validInput(game.id)),
+       accountService.EncryptionError,
+@@ -301,59 +314,55 @@ describe("Account Domain Service", () => {
+     process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
+   });
+ 
+-  it("encrypts credentials and stores only ciphertext and lookup hashes", async () => {
++  it("encrypts credentials and decrypts them back to the original values", async () => {
+     const game = await createGame("Encrypted", "PS5_ONLY");
+-    const input = validInput(game.id);
++    const input = validInput(game.id, {
++      psnEmail: "enc@example.com",
++      familyManagementEmail: "enc-fam@example.com",
++    });
+     const result = await accountService.createAccount(input);
+     assert.strictEqual(result.kind, "created");
+     if (result.kind !== "created") return;
+ 
+     const account = await getAccountByGameId(game.id);
+     assert.ok(account);
++    const keys = accountService.loadAccountMasterKey();
+ 
+-    assert.notStrictEqual(
+-      account!.psnEmailEncrypted,
++    assert.strictEqual(
++      decrypt(account!.psnEmailEncrypted as string, keys.encryptionKey),
+       input.psnEmail,
+-      "PSN email is stored as plaintext",
+     );
+-    assert.notStrictEqual(
+-      account!.psnPasswordEncrypted,
++    assert.strictEqual(
++      decrypt(account!.psnPasswordEncrypted as string, keys.encryptionKey),
+       input.psnPassword,
+-      "PSN password is stored as plaintext",
+     );
+-    assert.notStrictEqual(
+-      account!.emailPasswordEncryptedV2,
++    assert.strictEqual(
++      decrypt(account!.emailPasswordEncryptedV2 as string, keys.encryptionKey),
+       input.emailPassword,
+-      "email password is stored as plaintext",
+-    );
+-    assert.notStrictEqual(
+-      account!.familyManagementEmailEncryptedV2,
+-      input.familyManagementEmail,
+-      "family email is stored as plaintext",
+-    );
+-
+-    assert.ok(
+-      account!.psnEmailLookupHash && account!.psnEmailLookupHash.length > 0,
+-      "PSN email lookup hash is missing",
+-    );
+-    assert.ok(
+-      account!.familyManagementEmailLookupHash &&
+-        account!.familyManagementEmailLookupHash.length > 0,
+-      "family email lookup hash is missing",
+     );
+     assert.strictEqual(
+-      account!.statusOverride,
+-      null,
+-      "new account has a status override",
++      decrypt(
++        account!.familyManagementEmailEncryptedV2 as string,
++        keys.encryptionKey,
++      ),
++      input.familyManagementEmail,
+     );
+ 
+     const backupCodes = await getBackupCodes(account!.id);
+     assert.strictEqual(backupCodes.length, 2);
+-    for (const code of backupCodes) {
+-      assert.notStrictEqual(code.codeCiphertext, "code1");
+-      assert.notStrictEqual(code.codeCiphertext, "code2");
+-      assert.ok(code.codeCiphertext.length > 0);
+-    }
++    const decryptedCodes = backupCodes
++      .map((c) => decrypt(c.codeCiphertext, keys.encryptionKey))
++      .sort();
++    assert.deepStrictEqual(decryptedCodes, ["code1", "code2"]);
++  });
++
++  it("two encryptions of the same value produce different ciphertext", async () => {
++    const keys = accountService.loadAccountMasterKey();
++    const a = encrypt("same-secret", keys.encryptionKey);
++    const b = encrypt("same-secret", keys.encryptionKey);
++    assert.notStrictEqual(a, b);
++    assert.strictEqual(decrypt(a, keys.encryptionKey), "same-secret");
++    assert.strictEqual(decrypt(b, keys.encryptionKey), "same-secret");
+   });
+ 
+   it("returns a duplicate warning and writes nothing when duplicates exist", async () => {
+@@ -379,6 +388,33 @@ describe("Account Domain Service", () => {
+     await assertNoNewRows(before);
+   });
+ 
++  it("detects duplicates case-insensitively for emails and Online ID", async () => {
++    const game = await createGame("Case Dup", "PS5_ONLY");
++    const firstInput = validInput(game.id, {
++      psnEmail: "Case@Example.com",
++      onlineId: "MixedCaseId",
++    });
++    const first = await accountService.createAccount(firstInput);
++    assert.strictEqual(first.kind, "created");
++    if (first.kind !== "created") return;
++
++    const second = await accountService.createAccount({
++      ...firstInput,
++      psnEmail: (firstInput.psnEmail as string).toUpperCase(),
++      onlineId: "MIXEDCASEID",
++      familyManagementEmail: (
++        firstInput.familyManagementEmail as string
++      ).toUpperCase(),
++      backupCodes: ["case-code"],
++    });
++    assert.strictEqual(second.kind, "duplicate-warning");
++    if (second.kind !== "duplicate-warning") return;
++
++    assert.ok(second.duplicateFields.includes("psnEmail"));
++    assert.ok(second.duplicateFields.includes("onlineId"));
++    assert.ok(second.duplicateFields.includes("familyManagementEmail"));
++  });
++
+   it("creates an account when confirmed despite duplicates", async () => {
+     const game = await createGame("Confirmed", "PS5_ONLY");
+     const firstInput = validInput(game.id);
+@@ -439,18 +475,110 @@ describe("Account Domain Service", () => {
+     await assertNoNewRows(before);
+   });
+ 
+-  it("rolls back all writes when Backup Code insertion fails", async () => {
+-    const game = await createGame("Rollback Backup", "PS5_ONLY");
++  it("rolls back all writes when Backup Code insert fails due to database trigger", async () => {
++    const game = await createGame("Trigger Rollback", "PS5_ONLY");
+     const before = await getRowCounts();
++    const seqBefore = await getAccountCodeSeqValue();
++
++    await createBackupCodeRejectTrigger();
++    try {
++      await assert.rejects(
++        accountService.createAccount(validInput(game.id)),
++        (err: unknown) => {
++          const cause = (err as { cause?: { message?: string } }).cause;
++          const message = (err as Error).message;
++          return (
++            message.includes("rejected by test trigger") ||
++            !!cause?.message?.includes("rejected by test trigger")
++          );
++        },
++      );
++    } finally {
++      await dropBackupCodeRejectTrigger();
++    }
+ 
+-    await assert.rejects(
+-      accountService.createAccount(
+-        validInput(game.id, { backupCodes: ["valid", "   "] }),
+-      ),
+-      accountService.ValidationError,
++    await assertNoNewRows(before);
++
++    const sequenceRow = await db.db
++      .select()
++      .from(db.gameAccountSequencesTable)
++      .where(eq(db.gameAccountSequencesTable.gameId, game.id));
++    assert.strictEqual(
++      sequenceRow.length,
++      0,
++      "per-game sequence row must not remain after rollback",
+     );
+ 
+-    await assertNoNewRows(before);
++    const seqAfterFailure = await getAccountCodeSeqValue();
++    assert.strictEqual(
++      seqAfterFailure,
++      seqBefore + 1,
++      "global sequence consumed a value before the rollback",
++    );
++
++    const success = await accountService.createAccount(
++      validInput(game.id, {
++        psnEmail: "rollback-success@example.com",
++        onlineId: "RollbackSuccess",
++        familyManagementEmail: "rollback-success-fam@example.com",
++      }),
++    );
++    assert.strictEqual(success.kind, "created");
++    if (success.kind !== "created") return;
++    assert.strictEqual(
++      success.account.accountNumberSeq,
++      1,
++      "rolled-back per-game number is reused",
++    );
++    const successNumber = Number(success.account.accountCode.replace("ACC-", ""));
++    assert.ok(successNumber > seqAfterFailure, "global sequence has a gap");
++  });
++
++  it("creates correct capacity rows with exact kind and instanceNo tuples for all platforms", async () => {
++    const ps5Game = await createGame("PS5", "PS5_ONLY");
++    const ps5Result = await accountService.createAccount(
++      validInput(ps5Game.id),
++    );
++    assert.strictEqual(ps5Result.kind, "created");
++    if (ps5Result.kind !== "created") return;
++    const ps5Capacities = (await getCapacities(ps5Result.account.id))
++      .map((c) => [c.capacityKindV2, c.instanceNo])
++      .sort() as [string, number][];
++    assert.deepStrictEqual(ps5Capacities, [
++      ["Z2_PS5", 1],
++      ["Z2_PS5", 2],
++      ["Z3_SHARED_PS5_PS4", 0],
++    ]);
++
++    const bothGame = await createGame("Both", "PS4_AND_PS5");
++    const bothResult = await accountService.createAccount(
++      validInput(bothGame.id),
++    );
++    assert.strictEqual(bothResult.kind, "created");
++    if (bothResult.kind !== "created") return;
++    const bothCapacities = (await getCapacities(bothResult.account.id))
++      .map((c) => [c.capacityKindV2, c.instanceNo])
++      .sort() as [string, number][];
++    assert.deepStrictEqual(bothCapacities, [
++      ["Z2_PS4", 1],
++      ["Z2_PS5", 1],
++      ["Z2_PS5", 2],
++      ["Z3_SHARED_PS5_PS4", 0],
++    ]);
++
++    const ps4Game = await createGame("PS4", "PS4_ONLY");
++    const ps4Result = await accountService.createAccount(
++      validInput(ps4Game.id),
++    );
++    assert.strictEqual(ps4Result.kind, "created");
++    if (ps4Result.kind !== "created") return;
++    const ps4Capacities = (await getCapacities(ps4Result.account.id))
++      .map((c) => [c.capacityKindV2, c.instanceNo])
++      .sort() as [string, number][];
++    assert.deepStrictEqual(ps4Capacities, [
++      ["Z2_PS4", 1],
++      ["Z3_SHARED_PS5_PS4", 0],
++    ]);
+   });
+ 
+   it("allocates distinct identifiers for two concurrent creations", async () => {
+@@ -486,5 +614,69 @@ describe("Account Domain Service", () => {
+       first.account.displayNumber,
+       second.account.displayNumber,
+     );
++    assert.notStrictEqual(first.account.accountCode, second.account.accountCode);
++  });
++
++  it("concurrent identical unconfirmed requests produce one creation and one warning", async () => {
++    const game = await createGame("Concurrent Identical", "PS5_ONLY");
++    const input = validInput(game.id);
++    const before = await getRowCounts();
++
++    const [first, second] = await Promise.all([
++      accountService.createAccount(input),
++      accountService.createAccount({
++        ...input,
++        backupCodes: ["another-code"],
++      }),
++    ]);
++    const after = await getRowCounts();
++
++    assert.strictEqual(after.accounts, before.accounts + 1);
++    assert.ok(
++      (first.kind === "created" && second.kind === "duplicate-warning") ||
++        (first.kind === "duplicate-warning" && second.kind === "created"),
++    );
++
++    if (first.kind === "created") {
++      assert.strictEqual(second.kind, "duplicate-warning");
++      assert.ok((second as { duplicateFields: string[] }).duplicateFields.includes("psnEmail"));
++    } else {
++      assert.strictEqual(first.kind, "duplicate-warning");
++      assert.ok((first as { duplicateFields: string[] }).duplicateFields.includes("psnEmail"));
++    }
++  });
++
++  it("identifiers from a created and deleted account are not reused", async () => {
++    const game = await createGame("Deleted Reuse", "PS5_ONLY");
++    const first = await accountService.createAccount(validInput(game.id));
++    assert.strictEqual(first.kind, "created");
++    if (first.kind !== "created") return;
++
++    await db.db
++      .update(db.accountsTable)
++      .set({ deletedAt: new Date() })
++      .where(eq(db.accountsTable.id, first.account.id));
++
++    const second = await accountService.createAccount(
++      validInput(game.id, {
++        psnEmail: "reuse-second@example.com",
++        onlineId: "ReuseSecond",
++        familyManagementEmail: "reuse-second-fam@example.com",
++      }),
++    );
++    assert.strictEqual(second.kind, "created");
++    if (second.kind !== "created") return;
++
++    const firstCode = Number(first.account.accountCode.replace("ACC-", ""));
++    const secondCode = Number(second.account.accountCode.replace("ACC-", ""));
++    assert.ok(
++      secondCode > firstCode,
++      "global account code is not reused after deletion",
++    );
++    assert.strictEqual(
++      second.account.accountNumberSeq,
++      2,
++      "per-game sequence is not reused after deletion",
++    );
+   });
+ });
+diff --git a/artifacts/api-server/src/services/account/index.ts b/artifacts/api-server/src/services/account/index.ts
+index c6dbde5..c350eca 100644
+--- a/artifacts/api-server/src/services/account/index.ts
++++ b/artifacts/api-server/src/services/account/index.ts
+@@ -8,7 +8,6 @@ import {
+   type Account,
+   type Game,
+ } from "@workspace/db";
+-import * as schema from "@workspace/db/schema";
+ import { eq, and, isNull, sql } from "drizzle-orm";
+ import { z } from "zod";
+ import {
+@@ -46,15 +45,6 @@ export class InactiveGameError extends AccountDomainError {
+   }
+ }
+ 
+-export class DuplicateWarningError extends AccountDomainError {
+-  public readonly duplicateFields: string[];
+-
+-  constructor(duplicateFields: string[]) {
+-    super("Duplicate values detected");
+-    this.duplicateFields = duplicateFields;
+-  }
+-}
+-
+ export class IdentifierConflictError extends AccountDomainError {
+   constructor() {
+     super("Account identifier conflict");
+@@ -71,25 +61,42 @@ export type CreateAccountResult =
+   | { kind: "created"; account: SafeAccount }
+   | { kind: "duplicate-warning"; duplicateFields: string[] };
+ 
++const emailSchema = z.preprocess(
++  (v) => (typeof v === "string" ? v.trim().toLowerCase() : v),
++  z.string().email("Email must be a valid email address"),
++);
++
++const onlineIdSchema = z.preprocess(
++  (v) => (typeof v === "string" ? v.trim() : v),
++  z.string().min(1, "Online ID is required"),
++);
++
++const backupCodeSchema = z.preprocess(
++  (v) => (typeof v === "string" ? v.trim() : v),
++  z.string().min(1, "Backup code cannot be empty"),
++);
++
++const birthDateSchema = z
++  .string()
++  .regex(
++    /^\d{4}-\d{2}-\d{2}$/,
++    "birthDate must be in YYYY-MM-DD format",
++  )
++  .refine((value) => {
++    const date = new Date(value);
++    return date.toISOString().slice(0, 10) === value;
++  }, "birthDate must be a real calendar date");
++
+ export const CreateAccountInput = z
+   .object({
+     gameId: z.string().uuid(),
+-    psnEmail: z.string().email("PSN Email must be a valid email"),
++    psnEmail: emailSchema,
+     psnPassword: z.string().min(1, "PSN Password is required"),
+     emailPassword: z.string().min(1, "Email Password is required"),
+-    onlineId: z.string().min(1, "Online ID is required"),
+-    birthDate: z
+-      .string()
+-      .regex(
+-        /^\d{4}-\d{2}-\d{2}$/,
+-        "birthDate must be in YYYY-MM-DD format",
+-      ),
+-    familyManagementEmail: z.string().email(
+-      "Family Management Email must be a valid email",
+-    ),
+-    backupCodes: z
+-      .array(z.string())
+-      .min(1, "At least one backup code is required"),
++    onlineId: onlineIdSchema,
++    birthDate: birthDateSchema,
++    familyManagementEmail: emailSchema,
++    backupCodes: z.array(backupCodeSchema).min(1, "At least one backup code is required"),
+     confirmed: z.boolean().optional().default(false),
+   })
+   .strict();
+@@ -107,6 +114,12 @@ const MASTER_KEY_LENGTH = 32;
+ const ENCRYPTION_KEY_INFO = "ps-account-enc";
+ const LOOKUP_HASH_KEY_INFO = "ps-account-lookup";
+ 
++const ACCOUNT_IDENTIFIER_CONSTRAINTS = [
++  "accounts_account_code_unique",
++  "accounts_game_seq_unique",
++  "accounts_game_display_unique",
++];
++
+ export function loadAccountMasterKey(): AccountKeys {
+   const encoded = process.env["PLAYSYNCER_ACCOUNT_MASTER_KEY"];
+   if (!encoded) {
+@@ -122,6 +135,13 @@ export function loadAccountMasterKey(): AccountKeys {
+     );
+   }
+ 
++  // Reject malformed or non-canonical Base64 by requiring round-trip equality.
++  if (raw.toString("base64") !== encoded) {
++    throw new EncryptionError(
++      "PLAYSYNCER_ACCOUNT_MASTER_KEY is not canonical Base64",
++    );
++  }
++
+   if (raw.length !== MASTER_KEY_LENGTH) {
+     throw new EncryptionError(
+       `PLAYSYNCER_ACCOUNT_MASTER_KEY must be ${MASTER_KEY_LENGTH} bytes after Base64 decoding, got ${raw.length}`,
+@@ -149,10 +169,6 @@ export function loadAccountMasterKey(): AccountKeys {
+   };
+ }
+ 
+-export function generateTestMasterKey(): string {
+-  return crypto.randomBytes(MASTER_KEY_LENGTH).toString("base64");
+-}
+-
+ function normalizeEmail(value: string): string {
+   return value.trim().toLowerCase();
+ }
+@@ -161,16 +177,9 @@ function normalizeOnlineId(value: string): string {
+   return value.trim();
+ }
+ 
+-function normalizeBackupCode(value: string): string {
+-  const trimmed = value.trim();
+-  if (trimmed.length === 0) {
+-    throw new ValidationError("Backup codes cannot contain empty values");
+-  }
+-  return trimmed;
+-}
+-
+-export function formatAccountCode(seq: number): string {
+-  return `ACC-${String(seq).padStart(6, "0")}`;
++function deriveAdvisoryLockId(hashHex: string): bigint {
++  const unsigned = BigInt("0x" + hashHex.slice(0, 16));
++  return BigInt.asIntN(64, unsigned);
+ }
+ 
+ async function requireGame(client: DbClient, gameId: string): Promise<Game> {
+@@ -178,7 +187,8 @@ async function requireGame(client: DbClient, gameId: string): Promise<Game> {
+     .select()
+     .from(gamesTable)
+     .where(eq(gamesTable.id, gameId))
+-    .limit(1);
++    .limit(1)
++    .for("update");
+ 
+   if (!game || game.deletedAt) {
+     throw new GameNotFoundError();
+@@ -191,6 +201,40 @@ async function requireGame(client: DbClient, gameId: string): Promise<Game> {
+   return game;
+ }
+ 
++async function acquireDuplicateLocks(
++  client: DbClient,
++  input: {
++    psnEmail: string;
++    familyManagementEmail: string;
++    onlineId: string;
++  },
++  keys: AccountKeys,
++): Promise<void> {
++  const tokens = [
++    deriveAdvisoryLockId(
++      hashForLookup(normalizeEmail(input.psnEmail), keys.lookupHashKey),
++    ),
++    deriveAdvisoryLockId(
++      hashForLookup(
++        normalizeEmail(input.familyManagementEmail),
++        keys.lookupHashKey,
++      ),
++    ),
++    deriveAdvisoryLockId(
++      hashForLookup(
++        normalizeEmail(input.onlineId),
++        keys.lookupHashKey,
++      ),
++    ),
++  ];
++
++  tokens.sort((a, b) => (a < b ? -1 : 1));
++
++  for (const lockId of tokens) {
++    await client.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
++  }
++}
++
+ async function findDuplicateFields(
+   client: DbClient,
+   input: {
+@@ -374,9 +418,7 @@ async function insertBackupCodes(
+   backupCodes: string[],
+   keys: AccountKeys,
+ ): Promise<void> {
+-  const normalized = backupCodes.map(normalizeBackupCode);
+-
+-  const values = normalized.map((code) => ({
++  const values = backupCodes.map((code) => ({
+     accountId,
+     codeCiphertext: encrypt(code, keys.encryptionKey),
+   }));
+@@ -386,6 +428,19 @@ async function insertBackupCodes(
+   }
+ }
+ 
++export function formatAccountCode(seq: number): string {
++  return `ACC-${String(seq).padStart(6, "0")}`;
++}
++
++function isUniqueViolation(err: unknown): boolean {
++  const candidate = err as { code?: string; constraint?: string };
++  return (
++    candidate.code === "23505" &&
++    !!candidate.constraint &&
++    ACCOUNT_IDENTIFIER_CONSTRAINTS.includes(candidate.constraint)
++  );
++}
++
+ export async function createAccount(
+   input: unknown,
+ ): Promise<CreateAccountResult> {
+@@ -397,6 +452,12 @@ export async function createAccount(
+     const game = await requireGame(client, parsed.gameId);
+ 
+     if (!parsed.confirmed) {
++      await acquireDuplicateLocks(client, {
++        psnEmail: parsed.psnEmail,
++        familyManagementEmail: parsed.familyManagementEmail,
++        onlineId: parsed.onlineId,
++      }, keys);
++
+       const duplicates = await findDuplicateFields(client, {
+         psnEmail: parsed.psnEmail,
+         familyManagementEmail: parsed.familyManagementEmail,
+@@ -411,18 +472,23 @@ export async function createAccount(
+     const globalSeq = await allocateGlobalCode(client);
+     const perGameSeq = await allocatePerGameNumber(client, game.id);
+ 
+-    const account = await insertAccount(
+-      client,
+-      game,
+-      parsed,
+-      keys,
+-      globalSeq,
+-      perGameSeq,
+-    );
+-
+-    await insertCapacities(client, account.id, game.platform as GamePlatform);
+-    await insertBackupCodes(client, account.id, parsed.backupCodes, keys);
+-
+-    return { kind: "created", account: toSafeAccount(account) };
++    try {
++      const account = await insertAccount(
++        client,
++        game,
++        parsed,
++        keys,
++        globalSeq,
++        perGameSeq,
++      );
++      await insertCapacities(client, account.id, game.platform as GamePlatform);
++      await insertBackupCodes(client, account.id, parsed.backupCodes, keys);
++      return { kind: "created", account: toSafeAccount(account) };
++    } catch (err) {
++      if (isUniqueViolation(err)) {
++        throw new IdentifierConflictError();
++      }
++      throw err;
++    }
+   });
+ }
+diff --git a/attached_assets/Pasted-Continue-in-the-current-accepted-PlaySyncer-workspace-P_1784303431410.txt b/attached_assets/Pasted-Continue-in-the-current-accepted-PlaySyncer-workspace-P_1784303431410.txt
+deleted file mode 100644
+index b8ba83a..0000000
+--- a/attached_assets/Pasted-Continue-in-the-current-accepted-PlaySyncer-workspace-P_1784303431410.txt
++++ /dev/null
+@@ -1,207 +0,0 @@
+-Continue in the current accepted PlaySyncer workspace.
+-
+-PS-03D1-1 is approved and closed.
+-
+-Start only:
+-
+-PS-03D1-2A — Account Domain Service Implementation
+-
+-قبل از پاسخ دادن عجله نکن. اول مسئله، سورس، فایل‌ها، وابستگی‌ها، ریسک‌ها و اثرات جانبی را عمیق تحلیل کن. اگر شواهد کافی از سورس، لاگ، diff یا تست نداری، ادعای قطعی نکن. خروجی سطحی، حدسی، تبلیغاتی یا سریع نده. هر پیشنهاد کدنویسی باید کوچک، قابل تست، قابل rollback و سازگار با استانداردهای فعلی پروژه باشد. اگر چیزی خارج از scope است فقط گزارش بده و بدون تأیید من patch یا refactor پیشنهاد نکن. قبل از ارائه راه‌حل، تفاوت Fact، Assumption، Risk و Recommendation را مشخص کن.
+-
+-This stage authorizes implementation of the Account Domain Service and its tests only.
+-
+-Do not:
+-
+-- activate any Account API route
+-- update OpenAPI
+-- regenerate API clients
+-- connect the frontend
+-- implement Secret Reveal
+-- implement Customer Assignment
+-- change the database schema
+-- create or modify migrations
+-- run drizzle-kit push
+-- write to the live database
+-- add dependencies
+-- create or expose a real production secret
+-- perform unrelated refactoring
+-
+-Implement the smallest safe Account Domain Service based on the approved PS-03D1-1 design.
+-
+-Required behavior:
+-
+-1. Create a focused Account service under:
+-
+-artifacts/api-server/src/services/account/
+-
+-Keep the structure simple. Do not split the service into unnecessary files.
+-
+-2. Implement a key loader for:
+-
+-PLAYSYNCER_ACCOUNT_MASTER_KEY
+-
+-Rules:
+-
+-- value must be valid Base64
+-- decoded value must be exactly 32 bytes
+-- use Node.js built-in crypto/HKDF
+-- derive separate encryption and lookup-hash subkeys
+-- missing or invalid key must stop Account creation
+-- never log the key or plaintext credentials
+-- tests must use a synthetic test key
+-- do not create the real Replit Secret in this stage
+-
+-3. Implement Account creation input validation:
+-
+-- valid gameId UUID
+-- required PSN Email
+-- required PSN Password
+-- required Email Password
+-- required Online ID
+-- required birthDate in YYYY-MM-DD format
+-- required Family Management Email
+-- required backupCodes with at least one non-empty code
+-- optional internal confirmed boolean
+-- statusOverride must not be accepted
+-
+-4. Normalize values:
+-
+-- PSN Email: trim and lowercase
+-- Family Management Email: trim and lowercase
+-- Online ID: trim and store with its entered letter case
+-- duplicate comparison for Online ID: case-insensitive
+-- Backup Codes: trim and reject empty values
+-
+-5. Before creating an Account:
+-
+-- require an existing non-deleted Game
+-- reject Account creation when the Game is INACTIVE
+-- detect duplicates for:
+-  - PSN Email
+-  - Online ID
+-  - Family Management Email
+-
+-When duplicates exist and confirmed is false:
+-
+-- return a typed duplicate-warning result
+-- include only duplicate field names
+-- write nothing to the database
+-
+-When confirmed is true:
+-
+-- allow creation to continue
+-
+-6. Account identifiers:
+-
+-- global format: ACC-000001
+-- per-game format: GTA6-001
+-- no leading # character
+-- use account_code_seq for the global number
+-- never use MAX + 1
+-- create the per-game sequence row with ON CONFLICT DO NOTHING
+-- allocate the per-game number with UPDATE ... RETURNING
+-- created or deleted Account identifiers must never be reused
+-- a failed transaction may reuse its rolled-back per-game number
+-- gaps in the global sequence are acceptable
+-
+-7. Encrypt and store:
+-
+-- PSN Email
+-- PSN Password
+-- Email Password
+-- Family Management Email
+-- each Backup Code separately
+-
+-Create lookup hashes for the approved Account fields.
+-
+-Do not create a lookup hash for Backup Codes.
+-
+-8. Create Capacity rows automatically from the Game platform using the existing capacity-definition helper.
+-
+-Keep:
+-
+-Z3_SHARED_PS5_PS4
+-instanceNo = 0
+-
+-Do not manually create or remove Capacity definitions.
+-
+-9. Perform all Account creation writes in one database transaction:
+-
+-- identifier allocation
+-- Account insert
+-- Capacity inserts
+-- Backup Code inserts
+-
+-If any step fails, no partial Account, Capacity or Backup Code rows may remain.
+-
+-10. A newly created Account must have:
+-
+-statusOverride = null
+-
+-Do not persist AVAILABLE, PARTIALLY_SOLD or automatic SOLD as an Account status column.
+-
+-11. Return only a safe Domain result containing non-secret Account information.
+-
+-Do not return:
+-
+-- plaintext credentials
+-- ciphertext
+-- lookup hashes
+-- Backup Codes
+-- encryption keys
+-
+-12. Add focused tests covering at minimum:
+-
+-- valid creation
+-- all three Game platforms and their Capacity rows
+-- global and per-game identifier formatting
+-- no leading # in display number
+-- required Backup Code
+-- invalid birth date
+-- inactive Game rejection
+-- missing or invalid master key
+-- successful encryption and non-plaintext storage
+-- duplicate warning with no database write
+-- confirmed duplicate creation
+-- safe result without secrets
+-- rollback when Account creation fails
+-- rollback when Backup Code insertion fails
+-- two concurrent creations for the same Game receive different identifiers
+-
+-Use only disposable test databases or the existing isolated test harness.
+-
+-Do not write Account test data to the live workspace database.
+-
+-13. Keep the Account routes disabled.
+-
+-The existing disabled-route safety tests must continue to pass.
+-
+-14. Run and report actual exit codes for:
+-
+-- pnpm run typecheck
+-- pnpm --filter @workspace/api-server run test
+-- pnpm --filter @workspace/db run test
+-- pnpm --filter @workspace/db run test:migrations
+-- PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build
+-
+-15. Update only the relevant phase documentation to show that PS-03D1-2A implementation is awaiting review.
+-
+-Do not commit the changes yet.
+-
+-Return:
+-
+-- exact files created and modified
+-- a simple summary of what was implemented
+-- tests added
+-- actual test counts and exit codes
+-- confirmation that no route, migration, schema, OpenAPI or live database change occurred
+-- remaining risks or blockers
+-- git diff summary
+-- git status
+-
+-Final status must be exactly one of:
+-
+-- PS-03D1-2A — IMPLEMENTATION COMPLETE, AWAITING COMMAND CENTER REVIEW
+-- PS-03D1-2A — INCOMPLETE
+-- PS-03D1-2A — TEST FAILURE
+-- PS-03D1-2A — SCOPE OR DATABASE SAFETY VIOLATION
+\ No newline at end of file
+diff --git a/docs/CURRENT_PHASE.md b/docs/CURRENT_PHASE.md
+index a9cf0d1..f639bcc 100644
+--- a/docs/CURRENT_PHASE.md
++++ b/docs/CURRENT_PHASE.md
+@@ -18,15 +18,16 @@ PS-03D1 — Account Domain Core
+ 
+ ## Current Sub-stage
+ 
+-PS-03D1-2A — Account Domain Service Implementation and Tests Only
++PS-03D1-2B — Account Domain Core Corrections and Hardening
+ 
+ ## Current Status
+ 
+-PS-03D1-2A — IMPLEMENTATION COMPLETE, AWAITING COMMAND CENTER REVIEW
++PS-03D1-2B — HARDENING COMPLETE, AWAITING COMMAND CENTER REVIEW
+ 
+ ## Input Baseline
+ 
+ - Command Center has accepted the current workspace as the working baseline; the missing commit `a78514e` is not required.
++- PS-03D1-2A implementation (commit `0ab031d`) is the starting point for hardening.
+ 
+ Previous completed stage:
+ 
+@@ -70,15 +71,19 @@ These decisions define:
+ 
+ ## Current Objective
+ 
+-The Account Domain Service (`artifacts/api-server/src/services/account/index.ts`) and its focused tests are implemented. All required validation runs pass:
++PS-03D1-2A was implemented in commit `0ab031d`. PS-03D1-2B hardening corrections have been applied as uncommitted working-tree changes. The Account Domain Service now:
+ 
+-- `pnpm run typecheck`
+-- `pnpm --filter @workspace/api-server run test`
+-- `pnpm --filter @workspace/db run test`
+-- `pnpm --filter @workspace/db run test:migrations`
+-- `PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build`
++- locks the selected Game row with `FOR UPDATE` during Account creation
++- uses stable-order transaction-level advisory locks before duplicate checks to make concurrent identical requests safe
++- trims/lowercases emails, trims Online ID, rejects empty Online IDs, and validates real calendar dates
++- trims and rejects empty Backup Codes before the transaction begins
++- validates canonical Base64 for `PLAYSYNCER_ACCOUNT_MASTER_KEY`
++- converts PostgreSQL unique violations on approved Account identifier constraints into `IdentifierConflictError`
++- removes unused service code and imports
++- tests decryption of stored credentials and Backup Codes, strict input validation, exact capacity tuples, and concurrency safety
++- verifies rollback of Account, Capacities, and per-game sequence increase via a temporary database trigger on the disposable test database
+ 
+-Await Command Center review of the implementation before proceeding to Account routes, OpenAPI, generated clients, Secret Reveal, or Customer Assignment.
++Await Command Center review of the hardened implementation before proceeding to Account routes, OpenAPI, generated clients, Secret Reveal, or Customer Assignment.
+ 
+ ## Restrictions
+ 
+@@ -92,6 +97,7 @@ During this review gate:
+ - do not implement Customer Assignment
+ - do not modify the database schema or migrations
+ - do not run migrations or use `drizzle-kit push`
++- do not commit the PS-03D1-2B changes
+ - keep the disabled Account route safety tests passing
+ 
+ Only documentation, phase-transition bookkeeping, and review-fixes authorized by Command Center are permitted.
+@@ -102,4 +108,4 @@ Only documentation, phase-transition bookkeeping, and review-fixes authorized by
+ 
+ ## Next Gate
+ 
+-Command Center approval to proceed from PS-03D1-2A to PS-03D1-2B (Account routes and OpenAPI) or to close PS-03D1.
++Command Center approval to proceed from PS-03D1-2B to PS-03D1-2C (Account routes and OpenAPI) or to close PS-03D1.

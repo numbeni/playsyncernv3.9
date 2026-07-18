@@ -1,0 +1,105 @@
+diff --git a/artifacts/api-server/src/routes/games.test.ts b/artifacts/api-server/src/routes/games.test.ts
+index ea9e545..82b03bf 100644
+--- a/artifacts/api-server/src/routes/games.test.ts
++++ b/artifacts/api-server/src/routes/games.test.ts
+@@ -196,6 +196,51 @@ describe("Games API", () => {
+     assert.strictEqual(game.status, "ACTIVE");
+   });
+ 
++  it("created Game returns a valid UUID and is retrievable by GET /games/:id", async () => {
++    const { res, data } = await createGame("UUID Retrieve Test", "PS5_ONLY");
++    assert.strictEqual(res.status, 201);
++    const game = assertGame(data);
++    assert.ok(
++      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
++        game.id,
++      ),
++      "created game id is a valid UUID",
++    );
++
++    const getRes = await fetch(`${baseUrl}/games/${game.id}`);
++    assert.strictEqual(getRes.status, 200);
++    const getData = (await getRes.json()) as GameResponse;
++    assert.strictEqual(getData.game.id, game.id);
++    assert.strictEqual(getData.game.title, "UUID Retrieve Test");
++  });
++
++  it("created Game appears in GET /games", async () => {
++    const { data } = await createGame("List Appear Test", "PS5_ONLY");
++    const game = assertGame(data);
++
++    const listRes = await fetch(`${baseUrl}/games`);
++    assert.strictEqual(listRes.status, 200);
++    const listData = (await listRes.json()) as {
++      games: { id: string; title: string }[];
++    };
++    const found = listData.games.find((g) => g.id === game.id);
++    assert.ok(found, "created game appears in GET /games list");
++    assert.strictEqual(found.title, "List Appear Test");
++  });
++
++  it("normal POST /games validation/conflict failures never return 404", async () => {
++    const title = "Conflict Failure Test";
++    await createGame(title, "PS5_ONLY");
++
++    const { res: dupRes } = await createGame(title, "PS4_ONLY");
++    assert.notStrictEqual(dupRes.status, 404);
++    assert.strictEqual(dupRes.status, 409);
++
++    const { res: invalidRes } = await createGame("   ", "PS5_ONLY");
++    assert.notStrictEqual(invalidRes.status, 404);
++    assert.strictEqual(invalidRes.status, 400);
++  });
++
+   it("rejects duplicate normalized titles", async () => {
+     await createGame("Duplicate Title", "PS5_ONLY");
+     const { res, data } = await createGame(" Duplicate Title ", "PS4_ONLY");
+diff --git a/docs/CURRENT_PHASE.md b/docs/CURRENT_PHASE.md
+index f72b14f..5b33e30 100644
+--- a/docs/CURRENT_PHASE.md
++++ b/docs/CURRENT_PHASE.md
+@@ -14,11 +14,11 @@ APPROVED_AND_CLOSED
+ 
+ ## Current Stage
+ 
+-PS-03C0 — Live Database Evidence and Migration Readiness
++PS-03C2A — Runtime Schema Compatibility Refactor (Corrections)
+ 
+ ## Current Status
+ 
+-READY_FOR_READ_ONLY_DB_EVIDENCE
++CORRECTED, AWAITING COMMAND CENTER REVIEW
+ 
+ ## Input Baseline
+ 
+diff --git a/reports/ps03c2b_retirement_inventory.md b/reports/ps03c2b_retirement_inventory.md
+index 45536cb..f046ddd 100644
+--- a/reports/ps03c2b_retirement_inventory.md
++++ b/reports/ps03c2b_retirement_inventory.md
+@@ -11,6 +11,16 @@ These objects are part of the approved long-term Account runtime contract and mu
+ |--------|------|--------|
+ | `accounts.status_override` | column | Manual override enum (`SOLD`, `INACTIVE`) is the approved runtime status model. |
+ | `account_status_override` | enum | Approved override values; nullable on `accounts.status_override`. |
++| `accounts.online_id` | column | Non-secret Account identifier. |
++| `accounts.birth_date` | column | Non-secret Account identifier. |
++| `accounts.psn_email_encrypted` | column | Canonical PSN Email ciphertext storage. |
++| `accounts.psn_email_lookup_hash` | column | Canonical PSN Email lookup hash. |
++| `accounts.psn_password_encrypted` | column | Canonical PSN Password ciphertext storage. |
++| `accounts.psn_password_lookup_hash` | column | Canonical PSN Password lookup hash. |
++| `accounts.email_password_encrypted_v2` | column | Canonical Email Password ciphertext storage. |
++| `accounts.email_password_lookup_hash` | column | Canonical Email Password lookup hash. |
++| `accounts.family_management_email_encrypted_v2` | column | Canonical Family Management Email ciphertext storage. |
++| `accounts.family_management_email_lookup_hash` | column | Canonical Family Management Email lookup hash. |
+ | `capacity_customers` | table | Out of scope for Account Core; must remain untouched. |
+ | `account_code_seq` | sequence | Global Account code allocator; final. |
+ | `game_account_sequences` | table | Per-game Account number counter; final. |
+@@ -105,7 +115,8 @@ Runtime code, types, and documentation must not depend on lookup hashes, lifecyc
+ 
+ - All Account-related tables are empty in the live database, so destructive schema changes are safe.
+ - `capacity_customers` must remain untouched.
+-- The new canonical Account storage contract after 0003 should expose only non-secret identifier fields: `id`, `game_id`, `account_code`, `account_number_prefix`, `account_number_seq`, `display_number`, `online_id`, `birth_date`, `created_at`, `updated_at`, `deleted_at`, plus `status_override`.
++- The database Account contract after 0003 still retains the canonical ciphertext and lookup-hash columns listed in the Final objects table above. Those columns are never exposed by generic Account DTOs.
++- Generic Account DTOs expose only non-secret identifier fields: `id`, `game_id`, `account_code`, `account_number_prefix`, `account_number_seq`, `display_number`, `online_id`, `birth_date`, `created_at`, `updated_at`, `deleted_at`, plus `status_override`.
+ - The new canonical Backup Code storage contract is `id`, `account_id`, `code_ciphertext`, `created_at`.
+ - The new canonical Capacity kind contract is `capacity_kind_v2` with values `Z2_PS5`, `Z2_PS4`, `Z3_SHARED_PS5_PS4`.
+ - `game_account_sequences`, `account_code_seq`, and the identifier immutability trigger are final and must not be changed.

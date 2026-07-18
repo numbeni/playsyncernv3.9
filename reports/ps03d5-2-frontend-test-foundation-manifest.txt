@@ -1,0 +1,75 @@
+PS-03D5-2 — Frontend Test Foundation — Closure Manifest
+
+Baseline HEAD SHA
+  b45ad14f85c7fa649d476772382108fc1fa3caa5
+
+Closure commit message
+  test(accounts): close PS-03D5-2 frontend test foundation
+
+Files in the final PS-03D5-2 closure
+  artifacts/playsyncer/package.json
+  artifacts/playsyncer/vitest.config.ts
+  artifacts/playsyncer/src/test/setup.ts
+  artifacts/playsyncer/src/test/render.tsx
+  artifacts/playsyncer/src/test/fixtures.ts
+  artifacts/playsyncer/src/test/mocks.ts
+  artifacts/playsyncer/src/components/AccountStatusBadge.test.tsx
+  artifacts/playsyncer/src/components/AccountCardReadOnly.test.tsx
+  artifacts/playsyncer/src/components/AccountDetailsReadOnly.test.tsx
+  artifacts/playsyncer/src/pages/GameDetailPage.test.tsx
+  docs/CURRENT_PHASE.md
+  docs/DECISION_LOG.md
+  pnpm-lock.yaml
+  .replit
+  reports/ps03d5-2-frontend-test-foundation-report.md
+  reports/ps03d5-2-frontend-test-foundation-manifest.txt
+  reports/ps03d5-2-frontend-test-foundation.diff
+
+Exact test files and counts
+  artifacts/playsyncer/src/components/AccountStatusBadge.test.tsx          6 tests
+  artifacts/playsyncer/src/components/AccountCardReadOnly.test.tsx          15 tests
+  artifacts/playsyncer/src/components/AccountDetailsReadOnly.test.tsx     13 tests
+  artifacts/playsyncer/src/pages/GameDetailPage.test.tsx                   13 tests
+  Total frontend tests                                                   47 tests
+
+Test tooling dependencies (devDependencies only)
+  - vitest
+  - jsdom
+  - @testing-library/dom
+  - @testing-library/react
+  - @testing-library/jest-dom
+  - @testing-library/user-event
+  - @vitejs/plugin-react (already present, used by Vitest config)
+
+Test isolation and no-network guard
+  - GameDetailPage.test.tsx mocks useGames directly and no longer wraps the page in the real GamesProvider.
+  - src/test/setup.ts spies on global.fetch before each test, rejects any real request with a clear error, and asserts zero fetch calls after each test.
+  - The no-network guard is Vitest-only and does not affect Vite development or production.
+
+Validation results (all exit codes 0)
+  pnpm install --frozen-lockfile                                    PASS
+  pnpm --filter @workspace/playsyncer run test                     PASS (47/47, 0 unexpected fetch calls)
+  pnpm run typecheck                                                PASS
+  pnpm --filter @workspace/api-spec run codegen                     PASS
+  pnpm --filter @workspace/api-server run test                     PASS (77/77)
+  pnpm --filter @workspace/db run test                              PASS (16/16)
+  pnpm --filter @workspace/db run test:migrations                   PASS (38/38)
+  PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build  PASS
+  git diff --check                                                  PASS
+
+Confirmations
+  .replit restored byte-for-byte from baseline b45ad14f85c7fa649d476772382108fc1fa3caa5.
+  Version-controlled Replit workflows (Project, API Server, PlaySyncer Frontend) are preserved.
+  No product runtime source changed.
+  No backend behavior changed.
+  No OpenAPI spec changed.
+  No generated client changed.
+  No database schema or migration changed.
+  No Auth, RBAC, or Audit behavior changed.
+  No Account mutation route or UI activated.
+  No Secret Reveal or Backup Code Reveal activated.
+  Temporary artifacts removed before closure: attached_assets/Pasted-*, previous PS-03D5-2 review ZIP.
+
+Stage status
+  PS-03D5-2 — APPROVED AND CLOSED
+  Next authorized sub-stage: PS-03D5-3 — Create Account Backend, Runtime Disabled

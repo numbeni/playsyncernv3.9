@@ -1,0 +1,58 @@
+INFRA-R1 — Automatic Replit Startup Preparation — Source Review Manifest
+
+Status
+  INFRA-R1 — COMPLETE, AWAITING SOURCE REVIEW
+
+Goal
+  Ensure a fresh Replit import or workspace open can install dependencies,
+  build shared libraries, and apply database migrations automatically before
+  the API Server and PlaySyncer Frontend workflows start.
+
+Files changed
+  scripts/replit-bootstrap.sh          (new)
+  scripts/setup.sh                     (modified: delegates to bootstrap)
+  .replit                              (modified: bootstrap task per workflow)
+  .gitignore                           (modified: ignore .replit-bootstrap.lock)
+
+Files intentionally not changed
+  Product frontend or backend source code
+  OpenAPI specification
+  Generated clients
+  Database schema
+  Existing migrations
+  package.json dependency lists
+  PS-03 phase documentation
+
+Startup flow
+  1. Replit opens workspace.
+  2. User starts API Server / PlaySyncer Frontend / Project workflow.
+  3. Workflow executes ./scripts/replit-bootstrap.sh.
+  4. Bootstrap acquires exclusive lock via flock on .replit-bootstrap.lock.
+  5. Installs dependencies only when node_modules is missing or workspace
+     manifests/lockfile changed; stores hash in node_modules/.replit-bootstrap.hash.
+  6. Builds shared TypeScript declarations with pnpm run typecheck:libs.
+  7. Requires DATABASE_URL without printing it.
+  8. Runs pnpm --filter @workspace/db run db:check.
+  9. Runs pnpm --filter @workspace/db run db:migrate.
+ 10. Releases lock and exits.
+ 11. Workflow starts the dev server.
+
+Validation results
+  First bootstrap run:  exit 0, installed dependencies and applied migrations
+  Second bootstrap run: exit 0, skipped install because hash matched
+  API smoke test:       GET /api/games -> 200 OK, body {"games":[]}
+  Workflow status:      API Server running, PlaySyncer Frontend running
+  Secret scan:          No secret values found in workflow logs
+  Scope check:          No product source, OpenAPI, generated client, schema,
+                        migration, dependency list, or PS-03 docs changed
+
+Exclusions from review package
+  .git
+  node_modules
+  dist
+  build and caches
+  PostgreSQL data
+  .env and Secret files
+  old or nested ZIP files
+  attached_assets/Pasted-*
+  logs and PID files

@@ -1,0 +1,152 @@
+diff --git a/.gitignore b/.gitignore
+index 12bc7fa..d3a433c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -47,3 +47,4 @@ Thumbs.db
+ # Replit
+ .cache/
+ .local/
++.replit-bootstrap.lock
+diff --git a/.replit b/.replit
+index 3cd54c4..7a014bc 100644
+--- a/.replit
++++ b/.replit
+@@ -31,6 +31,10 @@ author = "agent"
+ [workflows.workflow.metadata]
+ outputType = "console"
+ 
++[[workflows.workflow.tasks]]
++task = "shell.exec"
++args = "./scripts/replit-bootstrap.sh"
++
+ [[workflows.workflow.tasks]]
+ task = "shell.exec"
+ args = "PORT=8080 BASE_PATH=/api pnpm --filter @workspace/api-server run dev"
+@@ -43,6 +47,10 @@ author = "agent"
+ [workflows.workflow.metadata]
+ outputType = "webview"
+ 
++[[workflows.workflow.tasks]]
++task = "shell.exec"
++args = "./scripts/replit-bootstrap.sh"
++
+ [[workflows.workflow.tasks]]
+ task = "shell.exec"
+ args = "PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run dev"
+diff --git a/scripts/replit-bootstrap.sh b/scripts/replit-bootstrap.sh
+new file mode 100755
+index 0000000..3f20637
+--- /dev/null
++++ b/scripts/replit-bootstrap.sh
+@@ -0,0 +1,78 @@
++#!/bin/bash
++set -euo pipefail
++
++# Replit bootstrap script for workflow startup.
++#
++# Goals:
++#   - Install dependencies only when node_modules is missing or workspace
++#     manifests/lockfile changed.
++#   - Build shared TypeScript declarations.
++#   - Check and apply database migrations safely.
++#   - Use a lock so parallel workflow starts (API + Frontend) do not race on
++#     install or migrate.
++#   - Remain safe and idempotent when executed repeatedly.
++#
++# It intentionally does NOT run drizzle-kit push and does NOT create sample data.
++
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++
++LOCK_FILE="$ROOT/.replit-bootstrap.lock"
++HASH_FILE="$ROOT/node_modules/.replit-bootstrap.hash"
++
++# Acquire an exclusive lock for the whole bootstrap so that parallel workflow
++# starts (e.g., API Server + Frontend) serialize install/migrate steps.
++exec 200>"$LOCK_FILE"
++flock -x 200
++
++compute_hash() {
++  # Hash the lockfile and every workspace package.json to detect dependency
++  # or script changes. The hash is stored inside node_modules so it is
++  # removed when node_modules is deleted.
++  sha256sum pnpm-lock.yaml \
++    $(find . -name package.json -not -path './node_modules/*' -not -path './.git/*' | sort) \
++    2>/dev/null \
++    | sha256sum \
++    | awk '{print $1}'
++}
++
++needs_install() {
++  if [ ! -d "$ROOT/node_modules" ]; then
++    return 0
++  fi
++  if [ ! -f "$HASH_FILE" ]; then
++    return 0
++  fi
++  local current_hash stored_hash
++  current_hash="$(compute_hash)"
++  stored_hash="$(cat "$HASH_FILE")"
++  if [ "$current_hash" != "$stored_hash" ]; then
++    return 0
++  fi
++  return 1
++}
++
++echo "==> Replit bootstrap started in $ROOT"
++
++if needs_install; then
++  echo "==> Dependencies changed or node_modules missing; installing..."
++  pnpm install --frozen-lockfile
++  compute_hash > "$HASH_FILE"
++else
++  echo "==> Dependencies are up to date; skipping install"
++fi
++
++echo "==> Building shared library TypeScript declarations..."
++pnpm run typecheck:libs
++
++echo "==> Checking database migration state..."
++if [ -z "${DATABASE_URL:-}" ]; then
++  echo "ERROR: DATABASE_URL is required but not set." >&2
++  exit 1
++fi
++pnpm --filter @workspace/db run db:check
++
++echo "==> Applying pending database migrations..."
++pnpm --filter @workspace/db run db:migrate
++
++echo "==> Replit bootstrap complete."
+diff --git a/scripts/setup.sh b/scripts/setup.sh
+index c63adb5..e8d98ab 100755
+--- a/scripts/setup.sh
++++ b/scripts/setup.sh
+@@ -1,25 +1,10 @@
+ #!/bin/bash
+ set -e
+ 
+-# Setup script for a fresh Replit import or after exporting the project.
+-# Runs all one-time steps that are needed before the app can serve requests.
+-# It is idempotent: running it again on an already-set-up project is safe.
++# Manual setup fallback for a fresh Replit import or after exporting the project.
++# Delegates to the same bootstrap logic used by the Replit workflows.
+ 
+ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ cd "$ROOT"
+ 
+-echo "==> Installing dependencies (pnpm)..."
+-pnpm install --frozen-lockfile
+-
+-echo "==> Building shared library TypeScript declarations..."
+-pnpm run typecheck:libs
+-
+-echo "==> Running database migrations..."
+-if [ -z "${DATABASE_URL:-}" ]; then
+-  echo "ERROR: DATABASE_URL is not set. Cannot run migrations."
+-  exit 1
+-fi
+-pnpm --filter @workspace/db run db:migrate
+-
+-echo "==> Setup complete."
+-echo "Restart the 'API Server' and 'PlaySyncer Frontend' workflows to use the fresh build."
++exec ./scripts/replit-bootstrap.sh
