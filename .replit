@@ -21,18 +21,17 @@ timeoutMs = 20000
 [nix]
 channel = "stable-25_05"
 
+# Port mappings are fixed so each artifact gets a stable external port.
+# Replit proxies external port 80 to the web root (PlaySyncer), so the
+# mockup-sandbox intentionally uses a different external port to avoid conflict.
 [[ports]]
 localPort = 8080
 externalPort = 8080
 
 [[ports]]
 localPort = 8081
-externalPort = 80
-
-[[ports]]
-localPort = 8082
 externalPort = 3000
 
 [[ports]]
 localPort = 24351
-externalPort = 3001
+externalPort = 80
