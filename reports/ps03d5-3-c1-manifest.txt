@@ -1,0 +1,18 @@
+Files changed from origin/main baseline:
+artifacts/api-server/src/routes/accounts.create.test.ts
+artifacts/api-server/src/routes/accounts.disabled.test.ts
+artifacts/api-server/src/routes/accounts.ts
+attached_assets/Pasted-Continue-in-the-current-PlaySyncer-workspace-Canonical-_1784385114796.txt
+docs/CURRENT_PHASE.md
+lib/api-spec/openapi.yaml
+reports/ps03d5-3-review.zip
+zipFile.zip
+
+Working tree status:
+ M artifacts/api-server/src/routes/accounts.create.test.ts
+ M artifacts/api-server/src/routes/accounts.disabled.test.ts
+ M artifacts/api-server/src/routes/accounts.ts
+ M docs/CURRENT_PHASE.md
+ M lib/api-spec/openapi.yaml
+?? reports/ps03d5-3-c1-manifest.txt
+?? reports/ps03d5-3-c1.diff

@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import express, { type Express } from "express";
 import net from "node:net";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { startTestPg, startApiServer } from "../lib/test-pg.ts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +164,32 @@ describe("Create Account handler", () => {
       .where(eq(db.accountBackupCodesTable.accountId, accountId));
   }
 
+  async function createBackupCodeRejectTrigger() {
+    await db.db.execute(sql`
+      CREATE OR REPLACE FUNCTION reject_account_backup_code_insert()
+      RETURNS trigger AS '
+      BEGIN
+        RAISE EXCEPTION ''account backup code insert rejected by test trigger'';
+      END;
+      ' LANGUAGE plpgsql;
+    `);
+    await db.db.execute(sql`
+      CREATE TRIGGER reject_account_backup_code_insert_trg
+      BEFORE INSERT ON account_backup_codes
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION reject_account_backup_code_insert();
+    `);
+  }
+
+  async function dropBackupCodeRejectTrigger() {
+    await db.db.execute(sql`
+      DROP TRIGGER IF EXISTS reject_account_backup_code_insert_trg ON account_backup_codes;
+    `);
+    await db.db.execute(sql`
+      DROP FUNCTION IF EXISTS reject_account_backup_code_insert();
+    `);
+  }
+
   it("public POST /games/:gameId/accounts returns 403 and writes nothing", async () => {
     const game = await createGame("Disabled Public Create Game", "PS5_ONLY");
     const before = await getRowCounts();
@@ -174,8 +200,9 @@ describe("Create Account handler", () => {
       body: JSON.stringify(validRequest()),
     });
     assert.strictEqual(res.status, 403);
-    const data = (await res.json()) as { error: string };
+    const data = (await res.json()) as { error: string; code: string };
     assert.strictEqual(data.error, "Account operations are not authorized");
+    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
 
     const after = await getRowCounts();
     assert.strictEqual(after.accounts, before.accounts);
@@ -259,16 +286,23 @@ describe("Create Account handler", () => {
     assert.strictEqual(data.code, "GAME_NOT_FOUND");
   });
 
-  it("inactive Game returns HTTP 409", async () => {
+  it("inactive Game returns HTTP 409 StandardApiError and writes nothing", async () => {
     const game = await createGame("Inactive Create Game", "PS5_ONLY", "INACTIVE");
+    const before = await getRowCounts();
     const res = await fetch(testUrl(game.id), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(validRequest()),
     });
     assert.strictEqual(res.status, 409);
-    const data = (await res.json()) as { code: string };
+    const data = (await res.json()) as { error: string; code: string };
+    assert.strictEqual(typeof data.error, "string");
     assert.strictEqual(data.code, "GAME_INACTIVE");
+
+    const after = await getRowCounts();
+    assert.strictEqual(after.accounts, before.accounts);
+    assert.strictEqual(after.capacities, before.capacities);
+    assert.strictEqual(after.backupCodes, before.backupCodes);
   });
 
   it("invalid UUID returns HTTP 400", async () => {
@@ -330,17 +364,23 @@ describe("Create Account handler", () => {
     assert.strictEqual(res.status, 400);
   });
 
-  it("body gameId cannot override path gameId", async () => {
-    const game = await createGame("Path Wins Game", "PS5_ONLY");
-    const otherGame = await createGame("Other Game Path Wins", "PS5_ONLY");
+  it("body gameId is rejected as an unexpected field with zero writes", async () => {
+    const game = await createGame("Body GameId Rejected", "PS5_ONLY");
+    const otherGame = await createGame("Other Game Body GameId", "PS5_ONLY");
+    const before = await getRowCounts();
     const res = await fetch(testUrl(game.id), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(validRequest({ gameId: otherGame.id })),
     });
-    assert.strictEqual(res.status, 201);
-    const data = (await res.json()) as { account: { gameId: string } };
-    assert.strictEqual(data.account.gameId, game.id);
+    assert.strictEqual(res.status, 400);
+    const data = (await res.json()) as { code: string };
+    assert.strictEqual(data.code, "VALIDATION_ERROR");
+
+    const after = await getRowCounts();
+    assert.strictEqual(after.accounts, before.accounts);
+    assert.strictEqual(after.capacities, before.capacities);
+    assert.strictEqual(after.backupCodes, before.backupCodes);
   });
 
   it("statusOverride is rejected", async () => {
@@ -353,7 +393,7 @@ describe("Create Account handler", () => {
     assert.strictEqual(res.status, 400);
   });
 
-  it("unconfirmed duplicate returns HTTP 409 with DUPLICATE_WARNING", async () => {
+  it("duplicate warning matches the OpenAPI response shape and performs no writes", async () => {
     const game = await createGame("Duplicate Warning Game", "PS5_ONLY");
     const request = validRequest();
 
@@ -372,10 +412,13 @@ describe("Create Account handler", () => {
     });
     assert.strictEqual(second.status, 409);
     const data = (await second.json()) as {
+      error: string;
       code: string;
       detail: { duplicateFields: string[] };
     };
+    assert.strictEqual(typeof data.error, "string");
     assert.strictEqual(data.code, "DUPLICATE_WARNING");
+    assert.ok(data.detail && typeof data.detail === "object");
     assert.ok(Array.isArray(data.detail.duplicateFields));
     assert.ok(data.detail.duplicateFields.length > 0);
     for (const field of data.detail.duplicateFields) {
@@ -425,6 +468,74 @@ describe("Create Account handler", () => {
       assert.strictEqual(after.backupCodes, before.backupCodes);
     } finally {
       process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
+    }
+  });
+
+  it("IdentifierConflictError returns HTTP 409 with ACCOUNT_IDENTIFIER_CONFLICT and zero writes", async () => {
+    const game = await createGame("Identifier Conflict Game", "PS5_ONLY");
+    const first = await fetch(testUrl(game.id), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validRequest()),
+    });
+    assert.strictEqual(first.status, 201);
+
+    const before = await getRowCounts();
+
+    // Force the per-game counter back so the next account collides on the unique constraint.
+    await db.db
+      .update(db.gameAccountSequencesTable)
+      .set({ lastValue: 0 })
+      .where(eq(db.gameAccountSequencesTable.gameId, game.id));
+
+    try {
+      const res = await fetch(testUrl(game.id), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          validRequest({
+            psnEmail: "conflict-second@example.com",
+            onlineId: "ConflictSecond",
+            familyManagementEmail: "conflict-second-fam@example.com",
+          }),
+        ),
+      });
+      assert.strictEqual(res.status, 409);
+      const data = (await res.json()) as { error: string; code: string };
+      assert.strictEqual(typeof data.error, "string");
+      assert.strictEqual(data.code, "ACCOUNT_IDENTIFIER_CONFLICT");
+
+      const after = await getRowCounts();
+      assert.strictEqual(after.accounts, before.accounts);
+      assert.strictEqual(after.capacities, before.capacities);
+      assert.strictEqual(after.backupCodes, before.backupCodes);
+    } finally {
+      await db.db
+        .update(db.gameAccountSequencesTable)
+        .set({ lastValue: 1 })
+        .where(eq(db.gameAccountSequencesTable.gameId, game.id));
+    }
+  });
+
+  it("forced database failure rolls back Account, Capacities, and Backup Codes", async () => {
+    const game = await createGame("Rollback Game", "PS5_ONLY");
+    const before = await getRowCounts();
+
+    await createBackupCodeRejectTrigger();
+    try {
+      const res = await fetch(testUrl(game.id), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validRequest()),
+      });
+      assert.notStrictEqual(res.status, 201, "request must not succeed");
+
+      const after = await getRowCounts();
+      assert.strictEqual(after.accounts, before.accounts, "no partial account");
+      assert.strictEqual(after.capacities, before.capacities, "no partial capacities");
+      assert.strictEqual(after.backupCodes, before.backupCodes, "no partial backup codes");
+    } finally {
+      await dropBackupCodeRejectTrigger();
     }
   });
 });

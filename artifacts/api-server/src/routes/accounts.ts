@@ -170,12 +170,20 @@ export async function createAccountHandler(
     const gameId = p(req.params["gameId"]);
     const body = req.body as Record<string, unknown>;
 
-    // Path gameId must always win; body gameId is rejected as an unexpected field.
-    const { gameId: _bodyGameId, ...bodyWithoutGameId } = body;
-    const result = await createAccountService({
-      ...bodyWithoutGameId,
-      gameId,
-    });
+    // The Game ID is taken from the path only; a body gameId is rejected as an
+    // unexpected field before any validation, encryption, or database writes.
+    if (Object.hasOwn(body, "gameId")) {
+      next(
+        new HttpError(
+          400,
+          "Unexpected field: gameId must come from the path",
+          "VALIDATION_ERROR",
+        ),
+      );
+      return;
+    }
+
+    const result = await createAccountService({ ...body, gameId });
 
     if (result.kind === "duplicate-warning") {
       res.status(409).json({
@@ -323,7 +331,7 @@ router.get(
 
 /** POST /games/:gameId/accounts — disabled; account creation is not authorized. */
 router.post("/games/:gameId/accounts", async (_req: Request, res: Response) => {
-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
+  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
 });
 
 /** PATCH /accounts/:id — disabled; account editing is not authorized. */

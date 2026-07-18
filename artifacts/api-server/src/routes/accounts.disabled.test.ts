@@ -95,8 +95,9 @@ describe("Account mutation routes are disabled", () => {
       }),
     });
     assert.strictEqual(res.status, 403);
-    const data = (await res.json()) as ErrorResponse;
+    const data = (await res.json()) as { error: string; code: string };
     assert.strictEqual(data.error, "Account operations are not authorized");
+    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
   });
 
