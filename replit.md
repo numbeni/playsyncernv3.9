@@ -4,12 +4,27 @@ PlayStation account subscription management platform — tracks games, shared ac
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/playsyncer run dev` — frontend dev server (React/Vite)
-- `pnpm --filter @workspace/api-server run dev` — API server (Express 5, port 8080)
+The project uses Replit artifact-managed workflows. After a fresh import the three services start automatically:
+
+- `artifacts/playsyncer: web` — React/Vite frontend at `/`
+- `artifacts/api-server: API Server` — Express 5 API at `/api`
+- `artifacts/mockup-sandbox: Component Preview Server` — Canvas at `/__mockup`
+
+Manual fallback commands (from the workspace root):
+
+- `./scripts/setup.sh` — one-command setup after a fresh import or export (installs deps, builds shared libs, applies migrations)
+- `pnpm --filter @workspace/playsyncer run dev` — frontend dev server
+- `pnpm --filter @workspace/api-server run dev` — API server
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `./scripts/setup.sh` — one-command setup after a fresh import or export (installs deps, builds shared libs, applies migrations)
+
+## Re-import / export notes
+
+- The artifact definitions live in `artifacts/<name>/.replit-artifact/artifact.toml`. Each dev service runs `scripts/replit-bootstrap.sh` first, which installs dependencies, builds shared TypeScript declarations, and applies DB migrations.
+- `.replit` keeps the `[workflows]` section intentionally empty so Replit does not create duplicate legacy workflows that conflict with the artifact-managed ones.
+- If you export and re-import the repl, the three services should start automatically once `DATABASE_URL` is available. No manual `pnpm install` or migration step is required.
+- `PLAYSYNCER_ACCOUNT_MASTER_KEY` is only needed if you re-enable account creation/editing routes. It is not required for the current read-only account flows to start and serve.
 
 ## Stack
 
