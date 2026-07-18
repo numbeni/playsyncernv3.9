@@ -181,6 +181,60 @@ export const ListAccountsResponse = zod.object({
 
 
 /**
+ * Creates a new Account, its Capacity template, and its encrypted Backup Codes. The Game ID is taken from the path only. Duplicate values may be accepted by sending the same request again with `confirmed: true`.
+ * @summary Create an account for a game
+ */
+export const CreateAccountParams = zod.object({
+  "gameId": zod.coerce.string().uuid()
+})
+
+
+
+
+export const createAccountBodyBirthDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+
+
+export const createAccountBodyConfirmedDefault = false;
+
+export const CreateAccountBody = zod.object({
+  "psnEmail": zod.string().email(),
+  "psnPassword": zod.string().min(1),
+  "emailPassword": zod.string().min(1),
+  "onlineId": zod.string().min(1),
+  "birthDate": zod.string().regex(createAccountBodyBirthDateRegExp),
+  "familyManagementEmail": zod.string().email(),
+  "backupCodes": zod.array(zod.string().min(1)).min(1),
+  "confirmed": zod.boolean().default(createAccountBodyConfirmedDefault)
+})
+
+export const CreateAccountResponse = zod.object({
+  "account": zod.object({
+  "id": zod.string().uuid(),
+  "gameId": zod.string().uuid(),
+  "accountCode": zod.string(),
+  "accountNumberPrefix": zod.string(),
+  "accountNumberSeq": zod.number(),
+  "displayNumber": zod.string(),
+  "onlineId": zod.string().nullable(),
+  "birthDate": zod.string().nullable(),
+  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}).and(zod.object({
+  "capacities": zod.array(zod.object({
+  "id": zod.string().uuid(),
+  "accountId": zod.string().uuid(),
+  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
+  "instanceNo": zod.number(),
+  "displayLabel": zod.string(),
+  "isFinished": zod.boolean(),
+  "finishedAt": zod.coerce.date().nullable()
+}))
+}))
+})
+
+
+/**
  * Returns safe Account metadata without any Secret.
  * @summary Get a single account
  */

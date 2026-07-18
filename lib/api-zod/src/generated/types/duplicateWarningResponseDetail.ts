@@ -5,7 +5,8 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { DuplicateFieldName } from './duplicateFieldName';
 
 export type DuplicateWarningResponseDetail = {
-  duplicateFields: string[];
+  duplicateFields: DuplicateFieldName[];
 };

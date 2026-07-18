@@ -175,13 +175,29 @@ export interface CreateAccountRequest {
   confirmed?: boolean;
 }
 
+export type DuplicateWarningResponseCode = typeof DuplicateWarningResponseCode[keyof typeof DuplicateWarningResponseCode];
+
+
+export const DuplicateWarningResponseCode = {
+  DUPLICATE_WARNING: 'DUPLICATE_WARNING',
+} as const;
+
+export type DuplicateFieldName = typeof DuplicateFieldName[keyof typeof DuplicateFieldName];
+
+
+export const DuplicateFieldName = {
+  psnEmail: 'psnEmail',
+  familyManagementEmail: 'familyManagementEmail',
+  onlineId: 'onlineId',
+} as const;
+
 export type DuplicateWarningResponseDetail = {
-  duplicateFields: string[];
+  duplicateFields: DuplicateFieldName[];
 };
 
 export interface DuplicateWarningResponse {
   error: string;
-  code: string;
+  code: DuplicateWarningResponseCode;
   detail: DuplicateWarningResponseDetail;
 }
 

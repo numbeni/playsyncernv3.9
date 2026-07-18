@@ -7,7 +7,7 @@ import { decrypt, encrypt } from "../../lib/crypto.ts";
 let databaseUrl: string;
 let stopPg: () => Promise<void>;
 let db: typeof import("@workspace/db");
-let accountService: typeof import("./index");
+let accountService: typeof import("./index.ts");
 
 const TEST_MASTER_KEY = Buffer.from(
   "0123456789abcdef0123456789abcdef",

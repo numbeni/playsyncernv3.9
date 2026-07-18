@@ -3,9 +3,9 @@ import { db, ordersTable } from "@workspace/db";
 import { normalizeOrderCode, isValidOrderCode } from "@workspace/db/helpers";
 import { eq, isNull, desc } from "drizzle-orm";
 import { z } from "zod";
-import { logger } from "../lib/logger";
-import { p } from "../lib/req-param";
-import { requireUuidParam } from "../lib/validate-uuid";
+import { logger } from "../lib/logger.ts";
+import { p } from "../lib/req-param.ts";
+import { requireUuidParam } from "../lib/validate-uuid.ts";
 
 const router: IRouter = Router();
 

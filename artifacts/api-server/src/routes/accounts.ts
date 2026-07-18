@@ -15,15 +15,27 @@ import {
   type AccountCapacity,
 } from "@workspace/db";
 import { eq, isNull, and, asc, inArray } from "drizzle-orm";
-import { logger } from "../lib/logger";
-import { p } from "../lib/req-param";
-import { toSafeAccount, toSafeAccountCapacity } from "../lib/dto";
-import { requireUuidParam } from "../lib/validate-uuid";
-import { HttpError } from "../middlewares/error-handler";
+import { logger } from "../lib/logger.ts";
+import { p } from "../lib/req-param.ts";
+import {
+  toSafeAccount,
+  toSafeAccountCapacity,
+  type SafeAccount,
+  type SafeAccountDetail,
+} from "../lib/dto.ts";
+import { requireUuidParam } from "../lib/validate-uuid.ts";
+import { HttpError } from "../middlewares/error-handler.ts";
 import {
   deriveAccountStatus,
   type StatusCapacity,
-} from "../lib/account-status";
+} from "../lib/account-status.ts";
+import {
+  createAccount as createAccountService,
+  GameNotFoundError,
+  InactiveGameError,
+  IdentifierConflictError,
+  EncryptionError,
+} from "../services/account/index.ts";
 
 const router: IRouter = Router();
 
@@ -37,6 +49,10 @@ const PERSIAN = {
   GAME_NOT_FOUND: "بازی یافت نشد",
   ACCOUNT_NOT_FOUND: "اکانت یافت نشد",
   INTERNAL_ERROR: "خطای داخلی رخ داد",
+  DUPLICATE_WARNING:
+    "اطلاعات وارد شده با اکانت دیگری شباهت دارد. برای ادامه دوباره ارسال کنید با تایید صحت.",
+  GAME_INACTIVE: "بازی غیرفعال است و امکان ایجاد اکانت وجود ندارد",
+  ACCOUNT_IDENTIFIER_CONFLICT: "شناسه اکانت تکراری است",
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -116,6 +132,88 @@ function groupCapacitiesByAccount(
 
 function toStatusInput(capacities: AccountCapacity[]): StatusCapacity[] {
   return capacities.map((c) => ({ id: c.id, isFinished: c.isFinished }));
+}
+
+/** Build an AccountDetailResponse from a newly created safe Account. */
+async function buildCreatedAccountResponse(
+  account: SafeAccount,
+): Promise<SafeAccountDetail> {
+  const capacities = await loadCapacities([account.id]);
+  const capacityIds = capacities.map((c) => c.id);
+  const activeCustomerCapacityIds =
+    await loadActiveCustomerCapacityIds(capacityIds);
+  const status = deriveAccountStatus(
+    null,
+    toStatusInput(capacities),
+    activeCustomerCapacityIds,
+  );
+  return {
+    ...account,
+    status,
+    capacities: capacities.map(toSafeAccountCapacity),
+  };
+}
+
+/**
+ * Create Account HTTP handler.
+ *
+ * Exported but intentionally NOT mounted in the production router. The public
+ * POST /games/:gameId/accounts route remains disabled. Tests mount this handler
+ * in an isolated Express app to verify the contract and behavior.
+ */
+export async function createAccountHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const gameId = p(req.params["gameId"]);
+    const body = req.body as Record<string, unknown>;
+
+    // Path gameId must always win; body gameId is rejected as an unexpected field.
+    const { gameId: _bodyGameId, ...bodyWithoutGameId } = body;
+    const result = await createAccountService({
+      ...bodyWithoutGameId,
+      gameId,
+    });
+
+    if (result.kind === "duplicate-warning") {
+      res.status(409).json({
+        error: PERSIAN.DUPLICATE_WARNING,
+        code: "DUPLICATE_WARNING",
+        detail: { duplicateFields: result.duplicateFields },
+      });
+      return;
+    }
+
+    const accountDetail = await buildCreatedAccountResponse(result.account);
+    res.status(201).json({ account: accountDetail });
+  } catch (err) {
+    if (err instanceof GameNotFoundError) {
+      next(new HttpError(404, PERSIAN.GAME_NOT_FOUND, "GAME_NOT_FOUND"));
+      return;
+    }
+    if (err instanceof InactiveGameError) {
+      next(new HttpError(409, PERSIAN.GAME_INACTIVE, "GAME_INACTIVE"));
+      return;
+    }
+    if (err instanceof IdentifierConflictError) {
+      next(
+        new HttpError(
+          409,
+          PERSIAN.ACCOUNT_IDENTIFIER_CONFLICT,
+          "ACCOUNT_IDENTIFIER_CONFLICT",
+        ),
+      );
+      return;
+    }
+    if (err instanceof EncryptionError) {
+      logger.error(err, "Encryption configuration error during account creation");
+      next(new HttpError(500, PERSIAN.INTERNAL_ERROR, "INTERNAL_ERROR"));
+      return;
+    }
+    next(err);
+  }
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────

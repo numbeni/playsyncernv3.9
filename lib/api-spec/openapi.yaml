@@ -1,6 +1,5 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
   description: API specification
@@ -18,57 +17,61 @@ paths:
   /healthz:
     get:
       operationId: healthCheck
-      tags: [health]
+      tags:
+        - health
       summary: Health check
       description: Returns server health status
       responses:
-        "200":
+        '200':
           description: Healthy
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HealthStatus"
+                $ref: '#/components/schemas/HealthStatus'
   /readyz:
     get:
       operationId: readinessCheck
-      tags: [health]
+      tags:
+        - health
       summary: Readiness check
       description: Returns whether the server can reach its dependencies (e.g. PostgreSQL)
       responses:
-        "200":
+        '200':
           description: Ready
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ReadinessStatus"
-        "503":
+                $ref: '#/components/schemas/ReadinessStatus'
+        '503':
           description: Not ready
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ReadinessStatus"
+                $ref: '#/components/schemas/ReadinessStatus'
   /games:
     get:
       operationId: listGames
-      tags: [games]
+      tags:
+        - games
       summary: List all games
       description: Returns all games, including inactive ones, with account counts.
       responses:
-        "200":
+        '200':
           description: Games list
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GameListResponse"
-        "500":
+                $ref: '#/components/schemas/GameListResponse'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
     post:
       operationId: createGame
-      tags: [games]
+      tags:
+        - games
       summary: Create a game
       description: Creates a new game with a normalized title. Duplicate normalized titles are rejected.
       requestBody:
@@ -76,36 +79,37 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateGameRequest"
+              $ref: '#/components/schemas/CreateGameRequest'
       responses:
-        "201":
+        '201':
           description: Game created
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GameResponse"
-        "400":
+                $ref: '#/components/schemas/GameResponse'
+        '400':
           description: Invalid request body
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
           description: Duplicate normalized title
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
   /games/{id}:
     get:
       operationId: getGame
-      tags: [games]
+      tags:
+        - games
       summary: Get a single game
       parameters:
         - name: id
@@ -115,33 +119,34 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
+        '200':
           description: Game found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GameResponse"
-        "400":
+                $ref: '#/components/schemas/GameResponse'
+        '400':
           description: Invalid UUID
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
           description: Game not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
     patch:
       operationId: updateGame
-      tags: [games]
+      tags:
+        - games
       summary: Update a game
       description: |
         Updates a game's title, cover URL, status, or platform.
@@ -158,41 +163,42 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/UpdateGameRequest"
+              $ref: '#/components/schemas/UpdateGameRequest'
       responses:
-        "200":
+        '200':
           description: Game updated
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GameResponse"
-        "400":
+                $ref: '#/components/schemas/GameResponse'
+        '400':
           description: Invalid UUID or request body
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
           description: Game not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
           description: Duplicate normalized title or platform change blocked
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
     delete:
       operationId: deleteGame
-      tags: [games]
+      tags:
+        - games
       summary: Delete a game
       description: |
         Hard-deletes a game when no account history exists.
@@ -205,40 +211,41 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
+        '200':
           description: Game deleted
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/OkResponse"
-        "400":
+                $ref: '#/components/schemas/OkResponse'
+        '400':
           description: Invalid UUID
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
           description: Game not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
           description: Game has account history and cannot be deleted
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: '#/components/schemas/ErrorResponse'
   /games/{gameId}/accounts:
     get:
       operationId: listAccounts
-      tags: [accounts]
+      tags:
+        - accounts
       summary: List all accounts for a game
       description: Returns non-secret Account summaries for a single Game.
       parameters:
@@ -249,34 +256,93 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
+        '200':
           description: Accounts list
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AccountListResponse"
-        "400":
+                $ref: '#/components/schemas/AccountListResponse'
+        '400':
           description: Invalid UUID
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "404":
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
           description: Game not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "500":
+                $ref: '#/components/schemas/StandardApiError'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
+                $ref: '#/components/schemas/StandardApiError'
+    post:
+      operationId: createAccount
+      tags:
+        - accounts
+      summary: Create an account for a game
+      description: >-
+        Creates a new Account, its Capacity template, and its encrypted Backup Codes. The Game ID is taken from the path
+        only. Duplicate values may be accepted by sending the same request again with `confirmed: true`.
+      parameters:
+        - name: gameId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetailResponse'
+        '400':
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '403':
+          description: Account operations disabled in the mounted runtime
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
+          description: Game not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '409':
+          description: Duplicate warning, inactive game, or identifier conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DuplicateWarningResponse'
+        '500':
+          description: Unexpected or encryption configuration failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
   /accounts/{accountId}:
     get:
       operationId: getAccount
-      tags: [accounts]
+      tags:
+        - accounts
       summary: Get a single account
       description: Returns safe Account metadata without any Secret.
       parameters:
@@ -287,34 +353,35 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
+        '200':
           description: Account found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AccountDetailResponse"
-        "400":
+                $ref: '#/components/schemas/AccountDetailResponse'
+        '400':
           description: Invalid UUID
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "404":
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
           description: Account not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "500":
+                $ref: '#/components/schemas/StandardApiError'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
+                $ref: '#/components/schemas/StandardApiError'
   /accounts/{accountId}/capacities:
     get:
       operationId: getAccountCapacities
-      tags: [accounts]
+      tags:
+        - accounts
       summary: Get account capacities
       description: Returns Capacity rows and derived Account status information required by the Account workspace.
       parameters:
@@ -325,30 +392,30 @@ paths:
             type: string
             format: uuid
       responses:
-        "200":
+        '200':
           description: Account capacities
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AccountCapacitiesResponse"
-        "400":
+                $ref: '#/components/schemas/AccountCapacitiesResponse'
+        '400':
           description: Invalid UUID
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "404":
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
           description: Account not found
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
-        "500":
+                $ref: '#/components/schemas/StandardApiError'
+        '500':
           description: Internal server error
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/StandardApiError"
+                $ref: '#/components/schemas/StandardApiError'
 components:
   schemas:
     HealthStatus:
@@ -398,9 +465,9 @@ components:
           type: string
           nullable: true
         platform:
-          $ref: "#/components/schemas/GamePlatform"
+          $ref: '#/components/schemas/GamePlatform'
         status:
-          $ref: "#/components/schemas/GameStatus"
+          $ref: '#/components/schemas/GameStatus'
         createdAt:
           type: string
           format: date-time
@@ -421,7 +488,7 @@ components:
         - updatedAt
     GameListItem:
       allOf:
-        - $ref: "#/components/schemas/Game"
+        - $ref: '#/components/schemas/Game'
         - type: object
           properties:
             accountCount:
@@ -434,14 +501,14 @@ components:
         games:
           type: array
           items:
-            $ref: "#/components/schemas/GameListItem"
+            $ref: '#/components/schemas/GameListItem'
       required:
         - games
     GameResponse:
       type: object
       properties:
         game:
-          $ref: "#/components/schemas/Game"
+          $ref: '#/components/schemas/Game'
       required:
         - game
     CreateGameRequest:
@@ -451,15 +518,15 @@ components:
           type: string
           minLength: 1
           maxLength: 120
-          pattern: '^(?!\s*$).+$'
+          pattern: ^(?!\s*$).+$
           description: Game title. Must be 1-120 characters and cannot be whitespace-only.
         coverUrl:
           type: string
           format: uri
         platform:
-          $ref: "#/components/schemas/GamePlatform"
+          $ref: '#/components/schemas/GamePlatform'
         status:
-          $ref: "#/components/schemas/GameStatus"
+          $ref: '#/components/schemas/GameStatus'
       required:
         - title
         - platform
@@ -470,16 +537,16 @@ components:
           type: string
           minLength: 1
           maxLength: 120
-          pattern: '^(?!\s*$).+$'
+          pattern: ^(?!\s*$).+$
           description: Game title. Must be 1-120 characters and cannot be whitespace-only.
         coverUrl:
           type: string
           format: uri
           nullable: true
         platform:
-          $ref: "#/components/schemas/GamePlatform"
+          $ref: '#/components/schemas/GamePlatform'
         status:
-          $ref: "#/components/schemas/GameStatus"
+          $ref: '#/components/schemas/GameStatus'
     OkResponse:
       type: object
       properties:
@@ -535,7 +602,7 @@ components:
           type: string
           nullable: true
         status:
-          $ref: "#/components/schemas/AccountStatus"
+          $ref: '#/components/schemas/AccountStatus'
         createdAt:
           type: string
           format: date-time
@@ -556,13 +623,13 @@ components:
         - updatedAt
     AccountDetail:
       allOf:
-        - $ref: "#/components/schemas/AccountListItem"
+        - $ref: '#/components/schemas/AccountListItem'
         - type: object
           properties:
             capacities:
               type: array
               items:
-                $ref: "#/components/schemas/AccountCapacity"
+                $ref: '#/components/schemas/AccountCapacity'
           required:
             - capacities
     AccountCapacity:
@@ -575,7 +642,7 @@ components:
           type: string
           format: uuid
         capacityKind:
-          $ref: "#/components/schemas/CapacityKind"
+          $ref: '#/components/schemas/CapacityKind'
         instanceNo:
           type: integer
         displayLabel:
@@ -600,14 +667,14 @@ components:
         accounts:
           type: array
           items:
-            $ref: "#/components/schemas/AccountListItem"
+            $ref: '#/components/schemas/AccountListItem'
       required:
         - accounts
     AccountDetailResponse:
       type: object
       properties:
         account:
-          $ref: "#/components/schemas/AccountDetail"
+          $ref: '#/components/schemas/AccountDetail'
       required:
         - account
     AccountCapacitiesResponse:
@@ -616,9 +683,9 @@ components:
         capacities:
           type: array
           items:
-            $ref: "#/components/schemas/AccountCapacity"
+            $ref: '#/components/schemas/AccountCapacity'
         status:
-          $ref: "#/components/schemas/AccountStatus"
+          $ref: '#/components/schemas/AccountStatus'
       required:
         - capacities
         - status
@@ -639,8 +706,7 @@ components:
           minLength: 1
         birthDate:
           type: string
-          format: date
-          pattern: '^\d{4}-\d{2}-\d{2}$'
+          pattern: ^\d{4}-\d{2}-\d{2}$
         familyManagementEmail:
           type: string
           format: email
@@ -668,13 +734,15 @@ components:
           type: string
         code:
           type: string
+          enum:
+            - DUPLICATE_WARNING
         detail:
           type: object
           properties:
             duplicateFields:
               type: array
               items:
-                type: string
+                $ref: '#/components/schemas/DuplicateFieldName'
           required:
             - duplicateFields
       required:
@@ -697,3 +765,9 @@ components:
       required:
         - error
         - code
+    DuplicateFieldName:
+      type: string
+      enum:
+        - psnEmail
+        - familyManagementEmail
+        - onlineId

@@ -1,10 +1,10 @@
 import { Router, type IRouter } from "express";
-import healthRouter from "./health";
-import readyzRouter from "./readyz";
-import gamesRouter from "./games";
-import accountsRouter from "./accounts";
-import ordersRouter from "./orders";
-import capacityCustomersRouter from "./capacity-customers";
+import healthRouter from "./health.ts";
+import readyzRouter from "./readyz.ts";
+import gamesRouter from "./games.ts";
+import accountsRouter from "./accounts.ts";
+import ordersRouter from "./orders.ts";
+import capacityCustomersRouter from "./capacity-customers.ts";
 
 const router: IRouter = Router();
 

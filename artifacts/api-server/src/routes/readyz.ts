@@ -2,7 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { ReadinessCheckResponse } from "@workspace/api-zod";
-import { logger } from "../lib/logger";
+import { logger } from "../lib/logger.ts";
 
 const router: IRouter = Router();
 

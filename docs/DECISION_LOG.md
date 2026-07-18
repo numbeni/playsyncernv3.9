@@ -1179,3 +1179,33 @@ PS-03D5-2 — Frontend Test Foundation review and closure.
 ### Next gate
 
 PS-03D5-3 — Create Account Backend, Runtime Disabled (awaiting Command Center authorization to start).
+
+## 2026-07-18 — PS-03D5-3 Create Account Backend, Runtime Disabled Closure
+
+### Approved closure
+
+- PS-03D5-3 — Create Account Backend, Runtime Disabled is approved and closed.
+- OpenAPI now includes `POST /api/games/{gameId}/accounts` with `operationId: createAccount`.
+- Request contract: `CreateAccountRequest` (no `gameId`, `id`, `statusOverride`, `createdAt`, `updatedAt`, `deletedAt`, or `accountNumberSeq`).
+- Response contract: HTTP 201 returns the existing safe `AccountDetailResponse` (safe DTO only, no secrets, no passwords, no backup codes, no customer information).
+- HTTP 409 duplicate warning returns `DUPLICATE_WARNING` with an explicit `DuplicateFieldName` enum (`psnEmail`, `familyManagementEmail`, `onlineId`) and no matched values or account IDs.
+- Generated React Query client and Zod schemas include the Create Account contract without manual edits.
+- The public production route remains disabled and returns HTTP 403 for `POST /api/games/{gameId}/accounts`.
+- An exported `createAccountHandler` is implemented and tested in a dedicated test Express app.
+- Domain errors are mapped to HTTP codes: `GameNotFoundError` → 404, `InactiveGameError` → 409, `IdentifierConflictError` → 409, `EncryptionError` → 500.
+- Route-level integration tests verify: 403 public behavior, 201 success, capacity/backup-code creation, 404 missing/deleted game, 409 inactive game, 400 validation failures, duplicate-warning 409/confirmed retry, path `gameId` precedence, and no writes when the encryption key is missing.
+- Frontend boundary check: active frontend does not import or use `createAccount` or `useCreateAccount`.
+- API server test runner now uses a local ESM loader (`test-loader.mjs`) so integration tests can import source handlers without modifying generated clients.
+- Next authorized sub-stage is PS-03D5-4 — Update and Status Override Backend, Runtime Disabled.
+- Runtime activation of Account mutations remains deferred to PS-03D7.
+
+### Stage boundary
+
+- PS-03D5-3 is closed.
+- PS-03D5 as a whole is not closed; PS-03D5-4 is the next authorized sub-stage.
+- No schema, migration, or runtime public route activation changed in PS-03D5-3.
+- No product rule was changed by this sub-stage.
+
+### Next gate
+
+PS-03D5-4 — Update and Status Override Backend, Runtime Disabled (awaiting Command Center authorization to start).

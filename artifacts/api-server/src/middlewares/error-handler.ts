@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
-import { logger } from "../lib/logger";
+import { logger } from "../lib/logger.ts";
 
 /**
  * Thrown by route/middleware code to produce a specific HTTP status with a

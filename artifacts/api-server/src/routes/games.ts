@@ -14,9 +14,9 @@ import {
 } from "@workspace/db/helpers";
 import { eq, desc, count, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { p } from "../lib/req-param";
-import { requireUuidParam } from "../lib/validate-uuid";
-import { HttpError } from "../middlewares/error-handler";
+import { p } from "../lib/req-param.ts";
+import { requireUuidParam } from "../lib/validate-uuid.ts";
+import { HttpError } from "../middlewares/error-handler.ts";
 
 const router: IRouter = Router();
 

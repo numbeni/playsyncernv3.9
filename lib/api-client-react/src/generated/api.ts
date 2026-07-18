@@ -23,7 +23,9 @@ import type {
   AccountCapacitiesResponse,
   AccountDetailResponse,
   AccountListResponse,
+  CreateAccountRequest,
   CreateGameRequest,
+  DuplicateWarningResponse,
   ErrorResponse,
   GameListResponse,
   GameResponse,
@@ -665,6 +667,78 @@ export function useListAccounts<TData = Awaited<ReturnType<typeof listAccounts>>
 
 
 
+
+export const getCreateAccountUrl = (gameId: string,) => {
+
+
+
+
+  return `/api/games/${gameId}/accounts`
+}
+
+/**
+ * Creates a new Account, its Capacity template, and its encrypted Backup Codes. The Game ID is taken from the path only. Duplicate values may be accepted by sending the same request again with `confirmed: true`.
+ * @summary Create an account for a game
+ */
+export const createAccount = async (gameId: string,
+    createAccountRequest: CreateAccountRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
+
+  return customFetch<AccountDetailResponse>(getCreateAccountUrl(gameId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(createAccountRequest)
+  }
+);}
+
+
+
+
+export const getCreateAccountMutationOptions = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAccount>>, TError,{gameId: string;data: BodyType<CreateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createAccount>>, TError,{gameId: string;data: BodyType<CreateAccountRequest>}, TContext> => {
+
+const mutationKey = ['createAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createAccount>>, {gameId: string;data: BodyType<CreateAccountRequest>}> = (props) => {
+          const {gameId,data} = props ?? {};
+
+          return  createAccount(gameId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateAccountMutationResult = NonNullable<Awaited<ReturnType<typeof createAccount>>>
+    export type CreateAccountMutationBody = BodyType<CreateAccountRequest>
+    export type CreateAccountMutationError = ErrorType<StandardApiError | DuplicateWarningResponse>
+
+    /**
+ * @summary Create an account for a game
+ */
+export const useCreateAccount = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createAccount>>, TError,{gameId: string;data: BodyType<CreateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createAccount>>,
+        TError,
+        {gameId: string;data: BodyType<CreateAccountRequest>},
+        TContext
+      > => {
+      return useMutation(getCreateAccountMutationOptions(options));
+    }
 
 export const getGetAccountUrl = (accountId: string,) => {
 

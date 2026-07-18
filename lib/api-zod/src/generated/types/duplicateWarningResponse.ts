@@ -5,10 +5,11 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { DuplicateWarningResponseCode } from './duplicateWarningResponseCode';
 import type { DuplicateWarningResponseDetail } from './duplicateWarningResponseDetail';
 
 export interface DuplicateWarningResponse {
   error: string;
-  code: string;
+  code: DuplicateWarningResponseCode;
   detail: DuplicateWarningResponseDetail;
 }

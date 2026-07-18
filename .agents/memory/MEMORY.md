@@ -1,3 +1,5 @@
 - [Database migrations on import](db-migrations-on-import.md) — After importing this project, pnpm install and `pnpm --filter @workspace/db run db:migrate` are both required before the API server can serve `/api/games`.
 - [One-command project setup](setup-script.md) — `scripts/setup.sh` now bundles dependency install, shared-lib TS build, and DB migrations for fresh imports; `post-merge.sh` also builds shared libs after merges.
 - [Generated hook query options](generated-hook-query-options.md) — When overriding Orval-generated React Query options, also pass `queryKey` from the matching helper or TypeScript reports it as required.
+- [API server source integration tests](api-server-source-integration-tests.md) — Tests that import API server source handlers need a local ESM loader because generated and shared-lib imports remain extensionless.
+- [Orval Zod date + pattern](orval-zod-date-pattern.md) — In this spec, combine `type: string` with `pattern` only; `format: date` plus `pattern` produces an invalid ZodDate+regex schema.

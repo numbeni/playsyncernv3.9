@@ -105,6 +105,7 @@ describe("Account OpenAPI contract", () => {
       "AccountCapacitiesResponse",
       "CreateAccountRequest",
       "DuplicateWarningResponse",
+      "DuplicateFieldName",
       "StandardApiError",
     ];
     for (const name of required) {
@@ -143,7 +144,7 @@ describe("Account OpenAPI contract", () => {
 
   it("includes only approved read-only Account hooks", () => {
     const hooks = readFile(hooksFile);
-    const required = [
+    const requiredReadOnly = [
       "export const listAccounts",
       "export const getAccount",
       "export const getAccountCapacities",
@@ -151,19 +152,27 @@ describe("Account OpenAPI contract", () => {
       "export function useGetAccount",
       "export function useGetAccountCapacities",
     ];
-    for (const token of required) {
+    for (const token of requiredReadOnly) {
       assert.ok(
         hooks.includes(token),
         `expected generated hook token ${token}`,
       );
     }
-    const forbidden = [
+    const requiredCreate = [
       "export const createAccount",
+      "export const useCreateAccount",
+    ];
+    for (const token of requiredCreate) {
+      assert.ok(
+        hooks.includes(token),
+        `expected generated Create Account hook token ${token}`,
+      );
+    }
+    const forbidden = [
       "export const updateAccount",
       "export const deleteAccount",
       "export const getAccountSecrets",
       "export const getAccountBackupCodes",
-      "export function useCreateAccount",
       "export function useUpdateAccount",
       "export function useDeleteAccount",
       "export function useGetAccountSecrets",
@@ -192,16 +201,16 @@ describe("Account OpenAPI contract", () => {
       "expected GET /accounts/{accountId}/capacities path",
     );
     assert.ok(
+      openApi.includes("operationId: createAccount"),
+      "createAccount operation must be in OpenAPI",
+    );
+    assert.ok(
       !openApi.includes("/secrets"),
       "Secret Reveal path must not be in OpenAPI",
     );
     assert.ok(
       !openApi.includes("/backup-codes"),
       "Backup Code Reveal path must not be in OpenAPI",
-    );
-    assert.ok(
-      !openApi.includes("operationId: createAccount"),
-      "createAccount operation must not be in OpenAPI",
     );
     assert.ok(
       !openApi.includes("operationId: updateAccount"),

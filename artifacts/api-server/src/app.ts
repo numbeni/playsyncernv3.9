@@ -1,9 +1,9 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import router from "./routes";
-import { logger } from "./lib/logger";
-import { errorHandler, notFoundHandler } from "./middlewares/error-handler";
+import router from "./routes/index.ts";
+import { logger } from "./lib/logger.ts";
+import { errorHandler, notFoundHandler } from "./middlewares/error-handler.ts";
 
 const app: Express = express();
 
