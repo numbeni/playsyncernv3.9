@@ -11,7 +11,7 @@ paths = [ "/" ]
 localPort = 24351
 
 [services.development]
-run = "pnpm --filter @workspace/playsyncer run dev"
+run = "cd /home/runner/workspace && ./scripts/replit-bootstrap.sh && pnpm --filter @workspace/playsyncer run dev"
 
 [services.production]
 build = [ "pnpm", "--filter", "@workspace/playsyncer", "run", "build" ]
