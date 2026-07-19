@@ -31,10 +31,13 @@ import {
 } from "../lib/account-status.ts";
 import {
   createAccount as createAccountService,
+  updateAccount as updateAccountService,
+  setAccountStatusOverride as setAccountStatusOverrideService,
   GameNotFoundError,
   InactiveGameError,
   IdentifierConflictError,
   EncryptionError,
+  AccountNotFoundError,
 } from "../services/account/index.ts";
 
 const router: IRouter = Router();
@@ -134,16 +137,17 @@ function toStatusInput(capacities: AccountCapacity[]): StatusCapacity[] {
   return capacities.map((c) => ({ id: c.id, isFinished: c.isFinished }));
 }
 
-/** Build an AccountDetailResponse from a newly created safe Account. */
-async function buildCreatedAccountResponse(
+/** Build an AccountDetailResponse from a safe Account and its override. */
+async function buildAccountDetailResponse(
   account: SafeAccount,
+  statusOverride: "SOLD" | "INACTIVE" | null,
 ): Promise<SafeAccountDetail> {
   const capacities = await loadCapacities([account.id]);
   const capacityIds = capacities.map((c) => c.id);
   const activeCustomerCapacityIds =
     await loadActiveCustomerCapacityIds(capacityIds);
   const status = deriveAccountStatus(
-    null,
+    statusOverride,
     toStatusInput(capacities),
     activeCustomerCapacityIds,
   );
@@ -194,7 +198,7 @@ export async function createAccountHandler(
       return;
     }
 
-    const accountDetail = await buildCreatedAccountResponse(result.account);
+    const accountDetail = await buildAccountDetailResponse(result.account, null);
     res.status(201).json({ account: accountDetail });
   } catch (err) {
     if (err instanceof GameNotFoundError) {
@@ -218,6 +222,87 @@ export async function createAccountHandler(
     if (err instanceof EncryptionError) {
       logger.error(err, "Encryption configuration error during account creation");
       next(new HttpError(500, PERSIAN.INTERNAL_ERROR, "INTERNAL_ERROR"));
+      return;
+    }
+    next(err);
+  }
+}
+
+/**
+ * Update Account HTTP handler.
+ *
+ * Exported but intentionally NOT mounted in the production router. The public
+ * PATCH /accounts/:accountId route remains disabled. Tests mount this handler
+ * in an isolated Express app to verify the contract and behavior.
+ */
+export async function updateAccountHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const accountId = p(req.params["id"]);
+    const result = await updateAccountService({
+      ...(req.body as Record<string, unknown>),
+      accountId,
+    });
+
+    if (result.kind === "duplicate-warning") {
+      res.status(409).json({
+        error: PERSIAN.DUPLICATE_WARNING,
+        code: "DUPLICATE_WARNING",
+        detail: { duplicateFields: result.duplicateFields },
+      });
+      return;
+    }
+
+    const accountDetail = await buildAccountDetailResponse(
+      result.account,
+      result.statusOverride,
+    );
+    res.status(200).json({ account: accountDetail });
+  } catch (err) {
+    if (err instanceof AccountNotFoundError) {
+      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
+      return;
+    }
+    if (err instanceof EncryptionError) {
+      logger.error(err, "Encryption configuration error during account update");
+      next(new HttpError(500, PERSIAN.INTERNAL_ERROR, "INTERNAL_ERROR"));
+      return;
+    }
+    next(err);
+  }
+}
+
+/**
+ * Set Account Status Override HTTP handler.
+ *
+ * Exported but intentionally NOT mounted in the production router. The public
+ * PATCH /accounts/:accountId/status-override route remains disabled. Tests
+ * mount this handler in an isolated Express app to verify the contract and
+ * behavior.
+ */
+export async function setAccountStatusOverrideHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const accountId = p(req.params["id"]);
+    const result = await setAccountStatusOverrideService({
+      ...(req.body as Record<string, unknown>),
+      accountId,
+    });
+
+    const accountDetail = await buildAccountDetailResponse(
+      result.account,
+      result.statusOverride,
+    );
+    res.status(200).json({ account: accountDetail });
+  } catch (err) {
+    if (err instanceof AccountNotFoundError) {
+      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
       return;
     }
     next(err);
@@ -336,12 +421,17 @@ router.post("/games/:gameId/accounts", async (_req: Request, res: Response) => {
 
 /** PATCH /accounts/:id — disabled; account editing is not authorized. */
 router.patch("/accounts/:id", async (_req: Request, res: Response) => {
-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
+  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
+});
+
+/** PATCH /accounts/:id/status-override — disabled; account status override is not authorized. */
+router.patch("/accounts/:id/status-override", async (_req: Request, res: Response) => {
+  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
 });
 
 /** DELETE /accounts/:id — disabled; account deletion is not authorized. */
 router.delete("/accounts/:id", async (_req: Request, res: Response) => {
-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
+  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
 });
 
 export default router;

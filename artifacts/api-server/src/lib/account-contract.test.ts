@@ -104,6 +104,8 @@ describe("Account OpenAPI contract", () => {
       "AccountDetailResponse",
       "AccountCapacitiesResponse",
       "CreateAccountRequest",
+      "UpdateAccountRequest",
+      "SetAccountStatusOverrideRequest",
       "DuplicateWarningResponse",
       "DuplicateFieldName",
       "StandardApiError",
@@ -168,12 +170,22 @@ describe("Account OpenAPI contract", () => {
         `expected generated Create Account hook token ${token}`,
       );
     }
-    const forbidden = [
+    const requiredUpdate = [
       "export const updateAccount",
+      "export const setAccountStatusOverride",
+      "export const useUpdateAccount",
+      "export const useSetAccountStatusOverride",
+    ];
+    for (const token of requiredUpdate) {
+      assert.ok(
+        hooks.includes(token),
+        `expected generated Update/Status hook token ${token}`,
+      );
+    }
+    const forbidden = [
       "export const deleteAccount",
       "export const getAccountSecrets",
       "export const getAccountBackupCodes",
-      "export function useUpdateAccount",
       "export function useDeleteAccount",
       "export function useGetAccountSecrets",
       "export function useGetAccountBackupCodes",
@@ -205,6 +217,14 @@ describe("Account OpenAPI contract", () => {
       "createAccount operation must be in OpenAPI",
     );
     assert.ok(
+      openApi.includes("operationId: updateAccount"),
+      "updateAccount operation must be in OpenAPI",
+    );
+    assert.ok(
+      openApi.includes("operationId: setAccountStatusOverride"),
+      "setAccountStatusOverride operation must be in OpenAPI",
+    );
+    assert.ok(
       !openApi.includes("/secrets"),
       "Secret Reveal path must not be in OpenAPI",
     );
@@ -213,12 +233,21 @@ describe("Account OpenAPI contract", () => {
       "Backup Code Reveal path must not be in OpenAPI",
     );
     assert.ok(
-      !openApi.includes("operationId: updateAccount"),
-      "updateAccount operation must not be in OpenAPI",
-    );
-    assert.ok(
       !openApi.includes("operationId: deleteAccount"),
       "deleteAccount operation must not be in OpenAPI",
+    );
+  });
+
+  it("does not allow the active frontend to import Account mutation hooks", () => {
+    const frontendSrc = path.resolve(root, "artifacts", "playsyncer", "src");
+    const output = execSync(
+      `grep -R "useUpdateAccount\\|useSetAccountStatusOverride\\|updateAccount\\|setAccountStatusOverride" ${frontendSrc} || true`,
+      { encoding: "utf-8" },
+    );
+    assert.strictEqual(
+      output.trim(),
+      "",
+      "active frontend imports or references Account mutation hooks/functions",
     );
   });
 });

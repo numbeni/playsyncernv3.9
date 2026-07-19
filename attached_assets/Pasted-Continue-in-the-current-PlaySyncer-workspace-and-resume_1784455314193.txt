@@ -1,0 +1,369 @@
+Continue in the current PlaySyncer workspace and resume the partially completed work for:
+
+PS-03D5-4 — Update Account and Status Override Backend, Runtime Disabled
+
+This is a continuation task, not a restart.
+
+Do not discard, rewrite, duplicate, or reimplement work that is already correct.
+Do not reset the workspace.
+Do not restore an older ZIP or baseline.
+Do not revert existing PS-03D5-4 changes merely because they are uncommitted.
+
+Before editing anything:
+
+1. Inspect the current working tree:
+   - git status
+   - git diff --stat
+   - git diff
+   - existing untracked PS-03D5-4 files
+
+2. Inspect the current implementation of:
+   - Account services
+   - Account routes and handlers
+   - OpenAPI contracts
+   - generated clients and schemas
+   - encryption and lookup-hash helpers
+   - duplicate-warning logic
+   - canonical status derivation
+   - Account tests
+   - docs/CURRENT_PHASE.md
+   - docs/DECISION_LOG.md
+
+3. Compare the current source against the complete PS-03D5-4 requirements below.
+
+4. Create an internal checklist with three classifications:
+   - already complete and correct
+   - implemented but incomplete or incorrect
+   - not implemented
+
+5. Modify only items that are incomplete, incorrect, or missing.
+
+Do not duplicate existing:
+- OpenAPI operations
+- handlers
+- service functions
+- schemas
+- generated hooks
+- test cases
+- test fixtures
+- documentation sections
+
+Preserve all correct partial work.
+
+## Scope restrictions
+
+Do not activate Account mutations.
+
+Do not start:
+- PS-03D5-5 Delete
+- Capacity mutations
+- Customer Assignment
+- frontend write UI
+- Auth
+- RBAC
+- Audit
+- Secret Reveal
+- Backup Code management
+
+Do not change:
+- database schema
+- migrations
+- dependencies
+- Replit infrastructure
+- Artifact workflows
+- bootstrap scripts
+- ports
+- production deployment behavior
+
+The intentionally empty `[workflows]` section in `.replit` and the current Artifact workflow/bootstrap setup must remain unchanged.
+
+## Required PS-03D5-4 result
+
+### 1. Update Account
+
+Operation:
+
+PATCH /api/accounts/{accountId}
+
+operationId:
+
+updateAccount
+
+Allowed request fields only:
+
+- psnEmail
+- psnPassword
+- emailPassword
+- onlineId
+- birthDate
+- familyManagementEmail
+- confirmed
+
+Rules:
+
+- at least one editable field is required
+- confirmed alone is invalid
+- omitted fields remain unchanged
+- unknown and immutable fields are rejected
+- birthDate must be a real YYYY-MM-DD date
+- updated sensitive fields are encrypted again
+- updated lookup fields regenerate lookup hashes
+- omitted sensitive fields must not be decrypted or encrypted again
+- PSN Email and Family Management Email comparisons are case-insensitive
+- Online ID is trimmed for storage and compared case-insensitively
+- immutable identifiers, gameId, Backup Codes, and Capacities remain unchanged
+- the operation is atomic
+- the response uses only the safe Account DTO and contains no secrets
+
+Reject at minimum:
+
+- id
+- gameId
+- accountCode
+- displayNumber
+- accountNumberPrefix
+- accountNumberSeq
+- status
+- statusOverride
+- backupCodes
+- createdAt
+- updatedAt
+- unknown fields
+
+### Duplicate confirmation
+
+Check duplicates for:
+
+- psnEmail
+- familyManagementEmail
+- onlineId
+
+Rules:
+
+- exclude the Account being updated
+- unchanged values must not cause self-duplicate warnings
+- an unconfirmed duplicate returns HTTP 409:
+  - code: DUPLICATE_WARNING
+  - safe field names only
+- duplicate warning performs zero writes
+- retrying the same request with confirmed: true may proceed
+- confirmed bypasses only duplicate warning
+- validation and security checks still apply
+- preserve the existing safe concurrency and locking model
+
+### 2. Status Override
+
+Operation:
+
+PATCH /api/accounts/{accountId}/status-override
+
+operationId:
+
+setAccountStatusOverride
+
+Accept exactly:
+
+- SOLD
+- INACTIVE
+- null
+
+Rules:
+
+- null clears the override
+- AVAILABLE and PARTIALLY_SOLD are rejected
+- Capacities and Customer Assignments are not changed
+- return the safe Account DTO with recalculated canonical status
+- preserve status precedence:
+
+INACTIVE override
+> SOLD override
+> all capacities finished means SOLD
+> all capacities available means AVAILABLE
+> otherwise PARTIALLY_SOLD
+
+### 3. Testable handlers
+
+Ensure exported testable handlers exist:
+
+- updateAccountHandler
+- setAccountStatusOverrideHandler
+
+Reuse correct existing handlers if already implemented.
+
+Do not create duplicate handlers.
+
+### 4. Runtime safety
+
+Production routes must remain hard-disabled and return before validation or writes:
+
+{
+  "error": "Account operations are not authorized",
+  "code": "ACCOUNT_OPS_DISABLED"
+}
+
+Do not add feature flags or environment switches.
+
+Real handlers may only be mounted in test-only Express apps.
+
+The active frontend must remain read-only and must not call update or status-override mutation hooks.
+
+### 5. Tests
+
+First inspect existing tests and keep all correct coverage.
+
+Add or correct tests only where coverage is missing or failing.
+
+Required coverage:
+
+Update Account:
+- non-sensitive update
+- sensitive update
+- omitted fields unchanged
+- immutable fields rejected
+- unknown fields rejected
+- empty body rejected
+- confirmed-only body rejected
+- invalid UUID rejected
+- invalid email rejected
+- invalid or impossible birth date rejected
+- missing or deleted Account returns 404
+- duplicate against another Account returns 409
+- self-match does not warn
+- duplicate warning performs zero writes
+- confirmed duplicate succeeds
+- missing encryption key fails closed
+- encryption failure rolls back
+- database failure rolls back
+- Backup Codes remain unchanged
+- Capacities remain unchanged
+- immutable identifiers remain unchanged
+- response contains no secrets
+
+Status Override:
+- SOLD succeeds
+- INACTIVE succeeds
+- null clears override
+- AVAILABLE rejected
+- PARTIALLY_SOLD rejected
+- unknown fields rejected
+- missing or deleted Account returns 404
+- Capacities remain unchanged
+- derived status is correct after clearing the override
+
+Runtime safety:
+- both public PATCH routes return 403 + ACCOUNT_OPS_DISABLED
+- zero Account, Capacity, and Backup Code writes
+- production routes do not call the real handlers
+- frontend does not import or invoke active update/status mutation hooks
+
+Preserve all existing Create Account behavior and tests.
+
+## OpenAPI and generated code
+
+Inspect whether OpenAPI operations and generated clients already exist and are correct.
+
+Only change the OpenAPI contract when required.
+
+Do not manually edit generated files.
+
+Run the existing codegen command after any contract change, or run it once at the end to confirm no generated drift remains.
+
+Do not create duplicate generated operations or hooks.
+
+## Documentation
+
+When implementation is complete, update docs/CURRENT_PHASE.md to:
+
+Current stage:
+PS-03D5 — Account Mutation Implementation, Runtime Disabled
+
+Current sub-stage:
+PS-03D5-4 — Update and Status Override Backend, Runtime Disabled
+
+Current status:
+PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+
+Next planned sub-stage:
+PS-03D5-5 — Delete Account Safety Boundary
+
+Do not mark PS-03D5-4 approved or closed.
+
+Update docs/DECISION_LOG.md only with factual PS-03D5-4 implementation decisions that are not already recorded.
+
+Do not duplicate existing documentation entries.
+
+## Validation
+
+After completing only the missing or incorrect work, run and report actual exit codes:
+
+- pnpm install --frozen-lockfile
+- pnpm --filter @workspace/api-spec run codegen
+- pnpm run typecheck
+- pnpm --filter @workspace/api-server run test
+- pnpm --filter @workspace/api-server run build
+- pnpm --filter @workspace/db run test
+- pnpm --filter @workspace/db run test:migrations
+- pnpm --filter @workspace/playsyncer run test
+- PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build
+- git diff --check
+
+If a command fails, diagnose and correct only failures within PS-03D5-4 scope.
+
+Do not hide failed commands.
+Do not report success without actual command output.
+
+## Review deliverables
+
+Do not commit yet.
+
+Create or update, without duplicating:
+
+- reports/ps03d5-4-update-status-backend-report.md
+- reports/ps03d5-4-update-status-backend.diff
+- reports/ps03d5-4-update-status-backend-manifest.txt
+- playsyncer-ps03d5-4-update-status-backend-review.zip
+
+The ZIP must contain the complete current source and exclude:
+
+- .git
+- node_modules
+- dist
+- build
+- coverage
+- caches
+- database data
+- .env files
+- Secrets
+- attached_assets/Pasted-*
+- old or nested ZIPs
+- logs
+- PID files
+
+## Final response
+
+Report:
+
+- what was already complete before this continuation
+- what was incomplete or incorrect
+- what was added or corrected now
+- exact files changed during this continuation
+- final OpenAPI operations and generated hooks
+- final service functions and handlers
+- test files and final test counts
+- every validation command and exit code
+- proof both production PATCH routes remain 403
+- confirmation frontend remains read-only
+- confirmation schema and migrations did not change
+- confirmation Replit infrastructure did not change
+- final git status
+- ZIP filename, byte size, and SHA-256
+
+Final status must be exactly one of:
+
+- PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+- PS-03D5-4 — TEST OR BUILD FAILURE
+- PS-03D5-4 — CONTRACT CONFLICT
+- PS-03D5-4 — RUNTIME ACTIVATION BLOCKER
+- PS-03D5-4 — SECURITY BLOCKER
+- PS-03D5-4 — SCOPE VIOLATION
+- PS-03D5-4 — PACKAGING FAILURE

@@ -4,3 +4,4 @@
 - [Generated hook query options](generated-hook-query-options.md) — When overriding Orval-generated React Query options, also pass `queryKey` from the matching helper or TypeScript reports it as required.
 - [API server source integration tests](api-server-source-integration-tests.md) — Tests that import API server source handlers need a local ESM loader because generated and shared-lib imports remain extensionless.
 - [Orval Zod date + pattern](orval-zod-date-pattern.md) — In this spec, combine `type: string` with `pattern` only; `format: date` plus `pattern` produces an invalid ZodDate+regex schema.
+- [DB module lazy initialization for test isolation](db-lazy-init-test-isolation.md) — `@workspace/db` must lazy-initialize its pool/Drizzle on first access; static imports from route handlers otherwise bind to the environment DB before test `before` hooks set a test DB.

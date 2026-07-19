@@ -109,8 +109,23 @@ describe("Account mutation routes are disabled", () => {
       body: JSON.stringify({ status: "disabled" }),
     });
     assert.strictEqual(res.status, 403);
-    const data = (await res.json()) as ErrorResponse;
+    const data = (await res.json()) as { error: string; code: string };
     assert.strictEqual(data.error, "Account operations are not authorized");
+    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+    assert.strictEqual(countRows(databaseUrl, "accounts"), before);
+  });
+
+  it("PATCH /accounts/:id/status-override returns 403 and writes nothing", async () => {
+    const before = countRows(databaseUrl, "accounts");
+    const res = await fetch(`${baseUrl}/accounts/${gameId}/status-override`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statusOverride: "SOLD" }),
+    });
+    assert.strictEqual(res.status, 403);
+    const data = (await res.json()) as { error: string; code: string };
+    assert.strictEqual(data.error, "Account operations are not authorized");
+    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
   });
 
@@ -120,8 +135,9 @@ describe("Account mutation routes are disabled", () => {
       method: "DELETE",
     });
     assert.strictEqual(res.status, 403);
-    const data = (await res.json()) as ErrorResponse;
+    const data = (await res.json()) as { error: string; code: string };
     assert.strictEqual(data.error, "Account operations are not authorized");
+    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
   });
 

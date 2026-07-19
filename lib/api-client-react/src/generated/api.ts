@@ -32,7 +32,9 @@ import type {
   HealthStatus,
   OkResponse,
   ReadinessStatus,
+  SetAccountStatusOverrideRequest,
   StandardApiError,
+  UpdateAccountRequest,
   UpdateGameRequest
 } from './api.schemas';
 
@@ -818,6 +820,78 @@ export function useGetAccount<TData = Awaited<ReturnType<typeof getAccount>>, TE
 
 
 
+export const getUpdateAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/accounts/${accountId}`
+}
+
+/**
+ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
+ * @summary Update an account
+ */
+export const updateAccount = async (accountId: string,
+    updateAccountRequest: UpdateAccountRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
+
+  return customFetch<AccountDetailResponse>(getUpdateAccountUrl(accountId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(updateAccountRequest)
+  }
+);}
+
+
+
+
+export const getUpdateAccountMutationOptions = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext> => {
+
+const mutationKey = ['updateAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateAccount>>, {accountId: string;data: BodyType<UpdateAccountRequest>}> = (props) => {
+          const {accountId,data} = props ?? {};
+
+          return  updateAccount(accountId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateAccountMutationResult = NonNullable<Awaited<ReturnType<typeof updateAccount>>>
+    export type UpdateAccountMutationBody = BodyType<UpdateAccountRequest>
+    export type UpdateAccountMutationError = ErrorType<StandardApiError | DuplicateWarningResponse>
+
+    /**
+ * @summary Update an account
+ */
+export const useUpdateAccount = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateAccount>>,
+        TError,
+        {accountId: string;data: BodyType<UpdateAccountRequest>},
+        TContext
+      > => {
+      return useMutation(getUpdateAccountMutationOptions(options));
+    }
+
 export const getGetAccountCapacitiesUrl = (accountId: string,) => {
 
 
@@ -895,4 +969,76 @@ export function useGetAccountCapacities<TData = Awaited<ReturnType<typeof getAcc
 
 
 
+
+export const getSetAccountStatusOverrideUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/accounts/${accountId}/status-override`
+}
+
+/**
+ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
+ * @summary Set account status override
+ */
+export const setAccountStatusOverride = async (accountId: string,
+    setAccountStatusOverrideRequest: SetAccountStatusOverrideRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
+
+  return customFetch<AccountDetailResponse>(getSetAccountStatusOverrideUrl(accountId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setAccountStatusOverrideRequest)
+  }
+);}
+
+
+
+
+export const getSetAccountStatusOverrideMutationOptions = <TError = ErrorType<StandardApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext> => {
+
+const mutationKey = ['setAccountStatusOverride'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof setAccountStatusOverride>>, {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}> = (props) => {
+          const {accountId,data} = props ?? {};
+
+          return  setAccountStatusOverride(accountId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SetAccountStatusOverrideMutationResult = NonNullable<Awaited<ReturnType<typeof setAccountStatusOverride>>>
+    export type SetAccountStatusOverrideMutationBody = BodyType<SetAccountStatusOverrideRequest>
+    export type SetAccountStatusOverrideMutationError = ErrorType<StandardApiError>
+
+    /**
+ * @summary Set account status override
+ */
+export const useSetAccountStatusOverride = <TError = ErrorType<StandardApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof setAccountStatusOverride>>,
+        TError,
+        {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>},
+        TContext
+      > => {
+      return useMutation(getSetAccountStatusOverrideMutationOptions(options));
+    }
 

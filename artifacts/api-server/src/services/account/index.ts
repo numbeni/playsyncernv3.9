@@ -7,8 +7,9 @@ import {
   gamesTable,
   type Account,
   type Game,
+  type InsertAccount,
 } from "@workspace/db";
-import { eq, and, isNull, sql } from "drizzle-orm";
+import { eq, and, isNull, sql, ne } from "drizzle-orm";
 import { z } from "zod";
 import {
   buildCapacityDefinitions,
@@ -48,6 +49,12 @@ export class IdentifierConflictError extends AccountDomainError {
 export class EncryptionError extends AccountDomainError {
   constructor(message: string) {
     super(message);
+  }
+}
+
+export class AccountNotFoundError extends AccountDomainError {
+  constructor() {
+    super("Account not found");
   }
 }
 
@@ -514,5 +521,330 @@ export async function createAccount(
       }
       throw err;
     }
+  });
+}
+
+export type UpdateAccountResult =
+  | {
+      kind: "updated";
+      account: SafeAccount;
+      statusOverride: "SOLD" | "INACTIVE" | null;
+    }
+  | { kind: "duplicate-warning"; duplicateFields: string[] };
+
+export const UpdateAccountInput = z
+  .object({
+    accountId: z.string().uuid(),
+    psnEmail: emailSchema.optional(),
+    psnPassword: z.string().min(1, "PSN Password is required").optional(),
+    emailPassword: z.string().min(1, "Email Password is required").optional(),
+    onlineId: onlineIdSchema.optional(),
+    birthDate: birthDateSchema.optional(),
+    familyManagementEmail: emailSchema.optional(),
+    confirmed: z.boolean().optional().default(false),
+  })
+  .strict()
+  .refine(
+    (v) =>
+      [
+        "psnEmail",
+        "psnPassword",
+        "emailPassword",
+        "onlineId",
+        "birthDate",
+        "familyManagementEmail",
+      ].some((field) => v[field as keyof typeof v] !== undefined),
+    {
+      message: "At least one editable field is required; confirmed alone is not valid",
+    },
+  );
+
+export type UpdateAccountInput = z.infer<typeof UpdateAccountInput>;
+
+type ChangedLookupFields = {
+  psnEmail?: string;
+  familyManagementEmail?: string;
+  onlineId?: string;
+};
+
+async function acquireDuplicateLocksForUpdate(
+  client: DbClient,
+  changed: ChangedLookupFields,
+  keys: AccountKeys,
+): Promise<void> {
+  const tokens: bigint[] = [];
+  if (changed.psnEmail !== undefined) {
+    tokens.push(
+      deriveAdvisoryLockId(
+        hashForLookup(normalizeEmail(changed.psnEmail), keys.lookupHashKey),
+      ),
+    );
+  }
+  if (changed.familyManagementEmail !== undefined) {
+    tokens.push(
+      deriveAdvisoryLockId(
+        hashForLookup(
+          normalizeEmail(changed.familyManagementEmail),
+          keys.lookupHashKey,
+        ),
+      ),
+    );
+  }
+  if (changed.onlineId !== undefined) {
+    tokens.push(
+      deriveAdvisoryLockId(
+        hashForLookup(normalizeOnlineId(changed.onlineId), keys.lookupHashKey),
+      ),
+    );
+  }
+
+  const uniqueLockIds = [...new Set(tokens)].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  for (const lockId of uniqueLockIds) {
+    await client.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
+  }
+}
+
+async function findDuplicateFieldsForUpdate(
+  client: DbClient,
+  accountId: string,
+  changed: ChangedLookupFields,
+  keys: AccountKeys,
+): Promise<string[]> {
+  const duplicates: string[] = [];
+
+  if (changed.psnEmail !== undefined) {
+    const hash = hashForLookup(
+      normalizeEmail(changed.psnEmail),
+      keys.lookupHashKey,
+    );
+    const [match] = await client
+      .select({ id: accountsTable.id })
+      .from(accountsTable)
+      .where(
+        and(
+          eq(accountsTable.psnEmailLookupHash, hash),
+          isNull(accountsTable.deletedAt),
+          ne(accountsTable.id, accountId),
+        ),
+      )
+      .limit(1);
+    if (match) duplicates.push("psnEmail");
+  }
+
+  if (changed.familyManagementEmail !== undefined) {
+    const hash = hashForLookup(
+      normalizeEmail(changed.familyManagementEmail),
+      keys.lookupHashKey,
+    );
+    const [match] = await client
+      .select({ id: accountsTable.id })
+      .from(accountsTable)
+      .where(
+        and(
+          eq(accountsTable.familyManagementEmailLookupHash, hash),
+          isNull(accountsTable.deletedAt),
+          ne(accountsTable.id, accountId),
+        ),
+      )
+      .limit(1);
+    if (match) duplicates.push("familyManagementEmail");
+  }
+
+  if (changed.onlineId !== undefined) {
+    const normalized = normalizeOnlineId(changed.onlineId);
+    const [match] = await client
+      .select({ id: accountsTable.id })
+      .from(accountsTable)
+      .where(
+        and(
+          sql`LOWER(${accountsTable.onlineId}) = LOWER(${normalized})`,
+          isNull(accountsTable.deletedAt),
+          ne(accountsTable.id, accountId),
+        ),
+      )
+      .limit(1);
+    if (match) duplicates.push("onlineId");
+  }
+
+  return duplicates;
+}
+
+export async function updateAccount(
+  input: unknown,
+): Promise<UpdateAccountResult> {
+  const parsed = UpdateAccountInput.parse(input);
+  const keys = loadAccountMasterKey();
+
+  return db.transaction(async (tx) => {
+    const client = tx as unknown as DbClient;
+    const [account] = await client
+      .select()
+      .from(accountsTable)
+      .where(
+        and(
+          eq(accountsTable.id, parsed.accountId),
+          isNull(accountsTable.deletedAt),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!account) {
+      throw new AccountNotFoundError();
+    }
+
+    const updates: Partial<InsertAccount> = {};
+    const changedLookupFields: ChangedLookupFields = {};
+
+    if (parsed.psnEmail !== undefined) {
+      const normalized = normalizeEmail(parsed.psnEmail);
+      const newHash = hashForLookup(normalized, keys.lookupHashKey);
+      if (newHash !== account.psnEmailLookupHash) {
+        updates.psnEmailEncrypted = encrypt(normalized, keys.encryptionKey);
+        updates.psnEmailLookupHash = newHash;
+        changedLookupFields.psnEmail = normalized;
+      }
+    }
+
+    if (parsed.familyManagementEmail !== undefined) {
+      const normalized = normalizeEmail(parsed.familyManagementEmail);
+      const newHash = hashForLookup(normalized, keys.lookupHashKey);
+      if (newHash !== account.familyManagementEmailLookupHash) {
+        updates.familyManagementEmailEncryptedV2 = encrypt(
+          normalized,
+          keys.encryptionKey,
+        );
+        updates.familyManagementEmailLookupHash = newHash;
+        changedLookupFields.familyManagementEmail = normalized;
+      }
+    }
+
+    if (parsed.onlineId !== undefined) {
+      const normalized = normalizeOnlineId(parsed.onlineId);
+      if (
+        normalized.toLowerCase() !== (account.onlineId ?? "").toLowerCase()
+      ) {
+        updates.onlineId = normalized;
+        changedLookupFields.onlineId = normalized;
+      }
+    }
+
+    if (parsed.psnPassword !== undefined) {
+      const newHash = hashForLookup(parsed.psnPassword, keys.lookupHashKey);
+      if (newHash !== account.psnPasswordLookupHash) {
+        updates.psnPasswordEncrypted = encrypt(
+          parsed.psnPassword,
+          keys.encryptionKey,
+        );
+        updates.psnPasswordLookupHash = newHash;
+      }
+    }
+
+    if (parsed.emailPassword !== undefined) {
+      const newHash = hashForLookup(parsed.emailPassword, keys.lookupHashKey);
+      if (newHash !== account.emailPasswordLookupHash) {
+        updates.emailPasswordEncryptedV2 = encrypt(
+          parsed.emailPassword,
+          keys.encryptionKey,
+        );
+        updates.emailPasswordLookupHash = newHash;
+      }
+    }
+
+    if (
+      parsed.birthDate !== undefined &&
+      parsed.birthDate !== account.birthDate
+    ) {
+      updates.birthDate = parsed.birthDate;
+    }
+
+    const hasChangedLookup =
+      changedLookupFields.psnEmail !== undefined ||
+      changedLookupFields.familyManagementEmail !== undefined ||
+      changedLookupFields.onlineId !== undefined;
+
+    if (hasChangedLookup && !parsed.confirmed) {
+      await acquireDuplicateLocksForUpdate(client, changedLookupFields, keys);
+      const duplicates = await findDuplicateFieldsForUpdate(
+        client,
+        parsed.accountId,
+        changedLookupFields,
+        keys,
+      );
+      if (duplicates.length > 0) {
+        return { kind: "duplicate-warning", duplicateFields: duplicates };
+      }
+    }
+
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = new Date();
+      await client
+        .update(accountsTable)
+        .set(updates)
+        .where(eq(accountsTable.id, parsed.accountId));
+    }
+
+    // Re-fetch to get the updated row and any DB-computed defaults.
+    const [updated] = await client
+      .select()
+      .from(accountsTable)
+      .where(eq(accountsTable.id, parsed.accountId))
+      .limit(1);
+
+    return {
+      kind: "updated",
+      account: toSafeAccount(updated),
+      statusOverride: updated.statusOverride,
+    };
+  });
+}
+
+export const SetAccountStatusOverrideInput = z
+  .object({
+    accountId: z.string().uuid(),
+    statusOverride: z.enum(["SOLD", "INACTIVE"]).nullable(),
+  })
+  .strict();
+
+export type SetAccountStatusOverrideInput = z.infer<
+  typeof SetAccountStatusOverrideInput
+>;
+
+export async function setAccountStatusOverride(
+  input: unknown,
+): Promise<{ kind: "updated"; account: SafeAccount; statusOverride: "SOLD" | "INACTIVE" | null }> {
+  const parsed = SetAccountStatusOverrideInput.parse(input);
+
+  return db.transaction(async (tx) => {
+    const client = tx as unknown as DbClient;
+    const [account] = await client
+      .select()
+      .from(accountsTable)
+      .where(
+        and(
+          eq(accountsTable.id, parsed.accountId),
+          isNull(accountsTable.deletedAt),
+        ),
+      )
+      .limit(1)
+      .for("update");
+
+    if (!account) {
+      throw new AccountNotFoundError();
+    }
+
+    const [updated] = await client
+      .update(accountsTable)
+      .set({ statusOverride: parsed.statusOverride, updatedAt: new Date() })
+      .where(eq(accountsTable.id, parsed.accountId))
+      .returning();
+
+    return {
+      kind: "updated",
+      account: toSafeAccount(updated),
+      statusOverride: updated.statusOverride,
+    };
   });
 }

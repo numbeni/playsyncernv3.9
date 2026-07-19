@@ -379,6 +379,65 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StandardApiError'
+    patch:
+      operationId: updateAccount
+      tags:
+        - accounts
+      summary: Update an account
+      description: >-
+        Updates editable Account fields. Immutable fields, Backup Codes, and
+        Capacities cannot be changed. Duplicate values against other Accounts may
+        be accepted by sending `confirmed: true`.
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAccountRequest'
+      responses:
+        '200':
+          description: Account updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetailResponse'
+        '400':
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '403':
+          description: Account operations disabled in the mounted runtime
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '409':
+          description: Duplicate warning
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DuplicateWarningResponse'
+        '500':
+          description: Unexpected or encryption configuration failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
   /accounts/{accountId}/capacities:
     get:
       operationId: getAccountCapacities
@@ -414,6 +473,60 @@ paths:
                 $ref: '#/components/schemas/StandardApiError'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+  /accounts/{accountId}/status-override:
+    patch:
+      operationId: setAccountStatusOverride
+      tags:
+        - accounts
+      summary: Set account status override
+      description: >-
+        Sets, changes, or clears the Account status override. Accepted values are
+        SOLD, INACTIVE, or null. The response includes the recalculated canonical
+        Account status. Capacities and Customer Assignments are not modified.
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetAccountStatusOverrideRequest'
+      responses:
+        '200':
+          description: Account status override updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountDetailResponse'
+        '400':
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '403':
+          description: Account operations disabled in the mounted runtime
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '404':
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardApiError'
+        '500':
+          description: Unexpected error
           content:
             application/json:
               schema:
@@ -729,6 +842,43 @@ components:
         - birthDate
         - familyManagementEmail
         - backupCodes
+    UpdateAccountRequest:
+      type: object
+      properties:
+        psnEmail:
+          type: string
+          format: email
+        psnPassword:
+          type: string
+          minLength: 1
+        emailPassword:
+          type: string
+          minLength: 1
+        onlineId:
+          type: string
+          minLength: 1
+        birthDate:
+          type: string
+          pattern: ^\d{4}-\d{2}-\d{2}$
+        familyManagementEmail:
+          type: string
+          format: email
+        confirmed:
+          type: boolean
+          default: false
+      additionalProperties: false
+    SetAccountStatusOverrideRequest:
+      type: object
+      properties:
+        statusOverride:
+          type: string
+          nullable: true
+          enum:
+            - SOLD
+            - INACTIVE
+      required:
+        - statusOverride
+      additionalProperties: false
     DuplicateWarningResponse:
       type: object
       properties:

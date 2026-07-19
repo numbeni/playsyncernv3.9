@@ -175,6 +175,32 @@ export interface CreateAccountRequest {
   confirmed?: boolean;
 }
 
+export interface UpdateAccountRequest {
+  psnEmail?: string;
+  /** @minLength 1 */
+  psnPassword?: string;
+  /** @minLength 1 */
+  emailPassword?: string;
+  /** @minLength 1 */
+  onlineId?: string;
+  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+  birthDate?: string;
+  familyManagementEmail?: string;
+  confirmed?: boolean;
+}
+
+export type SetAccountStatusOverrideRequestStatusOverride = typeof SetAccountStatusOverrideRequestStatusOverride[keyof typeof SetAccountStatusOverrideRequestStatusOverride] | null;
+
+
+export const SetAccountStatusOverrideRequestStatusOverride = {
+  SOLD: 'SOLD',
+  INACTIVE: 'INACTIVE',
+} as const;
+
+export interface SetAccountStatusOverrideRequest {
+  statusOverride: SetAccountStatusOverrideRequestStatusOverride;
+}
+
 export type DuplicateWarningResponseCode = typeof DuplicateWarningResponseCode[keyof typeof DuplicateWarningResponseCode];
 
 

@@ -270,6 +270,57 @@ export const GetAccountResponse = zod.object({
 
 
 /**
+ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
+ * @summary Update an account
+ */
+export const UpdateAccountParams = zod.object({
+  "accountId": zod.coerce.string().uuid()
+})
+
+
+
+
+export const updateAccountBodyBirthDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+export const updateAccountBodyConfirmedDefault = false;
+
+export const UpdateAccountBody = zod.object({
+  "psnEmail": zod.string().email().optional(),
+  "psnPassword": zod.string().min(1).optional(),
+  "emailPassword": zod.string().min(1).optional(),
+  "onlineId": zod.string().min(1).optional(),
+  "birthDate": zod.string().regex(updateAccountBodyBirthDateRegExp).optional(),
+  "familyManagementEmail": zod.string().email().optional(),
+  "confirmed": zod.boolean().default(updateAccountBodyConfirmedDefault)
+})
+
+export const UpdateAccountResponse = zod.object({
+  "account": zod.object({
+  "id": zod.string().uuid(),
+  "gameId": zod.string().uuid(),
+  "accountCode": zod.string(),
+  "accountNumberPrefix": zod.string(),
+  "accountNumberSeq": zod.number(),
+  "displayNumber": zod.string(),
+  "onlineId": zod.string().nullable(),
+  "birthDate": zod.string().nullable(),
+  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}).and(zod.object({
+  "capacities": zod.array(zod.object({
+  "id": zod.string().uuid(),
+  "accountId": zod.string().uuid(),
+  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
+  "instanceNo": zod.number(),
+  "displayLabel": zod.string(),
+  "isFinished": zod.boolean(),
+  "finishedAt": zod.coerce.date().nullable()
+}))
+}))
+})
+
+
+/**
  * Returns Capacity rows and derived Account status information required by the Account workspace.
  * @summary Get account capacities
  */
@@ -288,6 +339,45 @@ export const GetAccountCapacitiesResponse = zod.object({
   "finishedAt": zod.coerce.date().nullable()
 })),
   "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE'])
+})
+
+
+/**
+ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
+ * @summary Set account status override
+ */
+export const SetAccountStatusOverrideParams = zod.object({
+  "accountId": zod.coerce.string().uuid()
+})
+
+export const SetAccountStatusOverrideBody = zod.object({
+  "statusOverride": zod.enum(['SOLD', 'INACTIVE']).nullable()
+})
+
+export const SetAccountStatusOverrideResponse = zod.object({
+  "account": zod.object({
+  "id": zod.string().uuid(),
+  "gameId": zod.string().uuid(),
+  "accountCode": zod.string(),
+  "accountNumberPrefix": zod.string(),
+  "accountNumberSeq": zod.number(),
+  "displayNumber": zod.string(),
+  "onlineId": zod.string().nullable(),
+  "birthDate": zod.string().nullable(),
+  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}).and(zod.object({
+  "capacities": zod.array(zod.object({
+  "id": zod.string().uuid(),
+  "accountId": zod.string().uuid(),
+  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
+  "instanceNo": zod.number(),
+  "displayLabel": zod.string(),
+  "isFinished": zod.boolean(),
+  "finishedAt": zod.coerce.date().nullable()
+}))
+}))
 })
 
 

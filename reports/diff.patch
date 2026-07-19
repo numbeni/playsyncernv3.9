@@ -1,0 +1,4833 @@
+diff --git a/artifacts/api-server/src/lib/account-contract.test.ts b/artifacts/api-server/src/lib/account-contract.test.ts
+index 45d312b..307aaa1 100644
+--- a/artifacts/api-server/src/lib/account-contract.test.ts
++++ b/artifacts/api-server/src/lib/account-contract.test.ts
+@@ -104,6 +104,8 @@ describe("Account OpenAPI contract", () => {
+       "AccountDetailResponse",
+       "AccountCapacitiesResponse",
+       "CreateAccountRequest",
++      "UpdateAccountRequest",
++      "SetAccountStatusOverrideRequest",
+       "DuplicateWarningResponse",
+       "DuplicateFieldName",
+       "StandardApiError",
+@@ -168,12 +170,22 @@ describe("Account OpenAPI contract", () => {
+         `expected generated Create Account hook token ${token}`,
+       );
+     }
+-    const forbidden = [
++    const requiredUpdate = [
+       "export const updateAccount",
++      "export const setAccountStatusOverride",
++      "export const useUpdateAccount",
++      "export const useSetAccountStatusOverride",
++    ];
++    for (const token of requiredUpdate) {
++      assert.ok(
++        hooks.includes(token),
++        `expected generated Update/Status hook token ${token}`,
++      );
++    }
++    const forbidden = [
+       "export const deleteAccount",
+       "export const getAccountSecrets",
+       "export const getAccountBackupCodes",
+-      "export function useUpdateAccount",
+       "export function useDeleteAccount",
+       "export function useGetAccountSecrets",
+       "export function useGetAccountBackupCodes",
+@@ -204,6 +216,14 @@ describe("Account OpenAPI contract", () => {
+       openApi.includes("operationId: createAccount"),
+       "createAccount operation must be in OpenAPI",
+     );
++    assert.ok(
++      openApi.includes("operationId: updateAccount"),
++      "updateAccount operation must be in OpenAPI",
++    );
++    assert.ok(
++      openApi.includes("operationId: setAccountStatusOverride"),
++      "setAccountStatusOverride operation must be in OpenAPI",
++    );
+     assert.ok(
+       !openApi.includes("/secrets"),
+       "Secret Reveal path must not be in OpenAPI",
+@@ -212,13 +232,22 @@ describe("Account OpenAPI contract", () => {
+       !openApi.includes("/backup-codes"),
+       "Backup Code Reveal path must not be in OpenAPI",
+     );
+-    assert.ok(
+-      !openApi.includes("operationId: updateAccount"),
+-      "updateAccount operation must not be in OpenAPI",
+-    );
+     assert.ok(
+       !openApi.includes("operationId: deleteAccount"),
+       "deleteAccount operation must not be in OpenAPI",
+     );
+   });
++
++  it("does not allow the active frontend to import Account mutation hooks", () => {
++    const frontendSrc = path.resolve(root, "artifacts", "playsyncer", "src");
++    const output = execSync(
++      `grep -R "useUpdateAccount\\|useSetAccountStatusOverride\\|updateAccount\\|setAccountStatusOverride" ${frontendSrc} || true`,
++      { encoding: "utf-8" },
++    );
++    assert.strictEqual(
++      output.trim(),
++      "",
++      "active frontend imports or references Account mutation hooks/functions",
++    );
++  });
+ });
+diff --git a/artifacts/api-server/src/routes/accounts.disabled.test.ts b/artifacts/api-server/src/routes/accounts.disabled.test.ts
+index 7ed25ee..9078de5 100644
+--- a/artifacts/api-server/src/routes/accounts.disabled.test.ts
++++ b/artifacts/api-server/src/routes/accounts.disabled.test.ts
+@@ -109,8 +109,23 @@ describe("Account mutation routes are disabled", () => {
+       body: JSON.stringify({ status: "disabled" }),
+     });
+     assert.strictEqual(res.status, 403);
+-    const data = (await res.json()) as ErrorResponse;
++    const data = (await res.json()) as { error: string; code: string };
+     assert.strictEqual(data.error, "Account operations are not authorized");
++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
++    assert.strictEqual(countRows(databaseUrl, "accounts"), before);
++  });
++
++  it("PATCH /accounts/:id/status-override returns 403 and writes nothing", async () => {
++    const before = countRows(databaseUrl, "accounts");
++    const res = await fetch(`${baseUrl}/accounts/${gameId}/status-override`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(res.status, 403);
++    const data = (await res.json()) as { error: string; code: string };
++    assert.strictEqual(data.error, "Account operations are not authorized");
++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
+   });
+ 
+@@ -120,8 +135,9 @@ describe("Account mutation routes are disabled", () => {
+       method: "DELETE",
+     });
+     assert.strictEqual(res.status, 403);
+-    const data = (await res.json()) as ErrorResponse;
++    const data = (await res.json()) as { error: string; code: string };
+     assert.strictEqual(data.error, "Account operations are not authorized");
++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
+   });
+ 
+diff --git a/artifacts/api-server/src/routes/accounts.ts b/artifacts/api-server/src/routes/accounts.ts
+index 8cdbda0..e6cd8eb 100644
+--- a/artifacts/api-server/src/routes/accounts.ts
++++ b/artifacts/api-server/src/routes/accounts.ts
+@@ -31,10 +31,13 @@ import {
+ } from "../lib/account-status.ts";
+ import {
+   createAccount as createAccountService,
++  updateAccount as updateAccountService,
++  setAccountStatusOverride as setAccountStatusOverrideService,
+   GameNotFoundError,
+   InactiveGameError,
+   IdentifierConflictError,
+   EncryptionError,
++  AccountNotFoundError,
+ } from "../services/account/index.ts";
+ 
+ const router: IRouter = Router();
+@@ -134,16 +137,17 @@ function toStatusInput(capacities: AccountCapacity[]): StatusCapacity[] {
+   return capacities.map((c) => ({ id: c.id, isFinished: c.isFinished }));
+ }
+ 
+-/** Build an AccountDetailResponse from a newly created safe Account. */
+-async function buildCreatedAccountResponse(
++/** Build an AccountDetailResponse from a safe Account and its override. */
++async function buildAccountDetailResponse(
+   account: SafeAccount,
++  statusOverride: "SOLD" | "INACTIVE" | null,
+ ): Promise<SafeAccountDetail> {
+   const capacities = await loadCapacities([account.id]);
+   const capacityIds = capacities.map((c) => c.id);
+   const activeCustomerCapacityIds =
+     await loadActiveCustomerCapacityIds(capacityIds);
+   const status = deriveAccountStatus(
+-    null,
++    statusOverride,
+     toStatusInput(capacities),
+     activeCustomerCapacityIds,
+   );
+@@ -194,7 +198,7 @@ export async function createAccountHandler(
+       return;
+     }
+ 
+-    const accountDetail = await buildCreatedAccountResponse(result.account);
++    const accountDetail = await buildAccountDetailResponse(result.account, null);
+     res.status(201).json({ account: accountDetail });
+   } catch (err) {
+     if (err instanceof GameNotFoundError) {
+@@ -224,6 +228,87 @@ export async function createAccountHandler(
+   }
+ }
+ 
++/**
++ * Update Account HTTP handler.
++ *
++ * Exported but intentionally NOT mounted in the production router. The public
++ * PATCH /accounts/:accountId route remains disabled. Tests mount this handler
++ * in an isolated Express app to verify the contract and behavior.
++ */
++export async function updateAccountHandler(
++  req: Request,
++  res: Response,
++  next: NextFunction,
++): Promise<void> {
++  try {
++    const accountId = p(req.params["id"]);
++    const result = await updateAccountService({
++      ...(req.body as Record<string, unknown>),
++      accountId,
++    });
++
++    if (result.kind === "duplicate-warning") {
++      res.status(409).json({
++        error: PERSIAN.DUPLICATE_WARNING,
++        code: "DUPLICATE_WARNING",
++        detail: { duplicateFields: result.duplicateFields },
++      });
++      return;
++    }
++
++    const accountDetail = await buildAccountDetailResponse(
++      result.account,
++      result.statusOverride,
++    );
++    res.status(200).json({ account: accountDetail });
++  } catch (err) {
++    if (err instanceof AccountNotFoundError) {
++      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
++      return;
++    }
++    if (err instanceof EncryptionError) {
++      logger.error(err, "Encryption configuration error during account update");
++      next(new HttpError(500, PERSIAN.INTERNAL_ERROR, "INTERNAL_ERROR"));
++      return;
++    }
++    next(err);
++  }
++}
++
++/**
++ * Set Account Status Override HTTP handler.
++ *
++ * Exported but intentionally NOT mounted in the production router. The public
++ * PATCH /accounts/:accountId/status-override route remains disabled. Tests
++ * mount this handler in an isolated Express app to verify the contract and
++ * behavior.
++ */
++export async function setAccountStatusOverrideHandler(
++  req: Request,
++  res: Response,
++  next: NextFunction,
++): Promise<void> {
++  try {
++    const accountId = p(req.params["id"]);
++    const result = await setAccountStatusOverrideService({
++      ...(req.body as Record<string, unknown>),
++      accountId,
++    });
++
++    const accountDetail = await buildAccountDetailResponse(
++      result.account,
++      result.statusOverride,
++    );
++    res.status(200).json({ account: accountDetail });
++  } catch (err) {
++    if (err instanceof AccountNotFoundError) {
++      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
++      return;
++    }
++    next(err);
++  }
++}
++
+ // ── Routes ──────────────────────────────────────────────────────────────────
+ 
+ /** GET /games/:gameId/accounts — list non-secret Account summaries for a Game. */
+@@ -336,12 +421,17 @@ router.post("/games/:gameId/accounts", async (_req: Request, res: Response) => {
+ 
+ /** PATCH /accounts/:id — disabled; account editing is not authorized. */
+ router.patch("/accounts/:id", async (_req: Request, res: Response) => {
+-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
++});
++
++/** PATCH /accounts/:id/status-override — disabled; account status override is not authorized. */
++router.patch("/accounts/:id/status-override", async (_req: Request, res: Response) => {
++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
+ });
+ 
+ /** DELETE /accounts/:id — disabled; account deletion is not authorized. */
+ router.delete("/accounts/:id", async (_req: Request, res: Response) => {
+-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
+ });
+ 
+ export default router;
+diff --git a/artifacts/api-server/src/services/account/index.ts b/artifacts/api-server/src/services/account/index.ts
+index e622fd8..a7f038b 100644
+--- a/artifacts/api-server/src/services/account/index.ts
++++ b/artifacts/api-server/src/services/account/index.ts
+@@ -7,8 +7,9 @@ import {
+   gamesTable,
+   type Account,
+   type Game,
++  type InsertAccount,
+ } from "@workspace/db";
+-import { eq, and, isNull, sql } from "drizzle-orm";
++import { eq, and, isNull, sql, ne } from "drizzle-orm";
+ import { z } from "zod";
+ import {
+   buildCapacityDefinitions,
+@@ -51,6 +52,12 @@ export class EncryptionError extends AccountDomainError {
+   }
+ }
+ 
++export class AccountNotFoundError extends AccountDomainError {
++  constructor() {
++    super("Account not found");
++  }
++}
++
+ export type CreateAccountResult =
+   | { kind: "created"; account: SafeAccount }
+   | { kind: "duplicate-warning"; duplicateFields: string[] };
+@@ -516,3 +523,328 @@ export async function createAccount(
+     }
+   });
+ }
++
++export type UpdateAccountResult =
++  | {
++      kind: "updated";
++      account: SafeAccount;
++      statusOverride: "SOLD" | "INACTIVE" | null;
++    }
++  | { kind: "duplicate-warning"; duplicateFields: string[] };
++
++export const UpdateAccountInput = z
++  .object({
++    accountId: z.string().uuid(),
++    psnEmail: emailSchema.optional(),
++    psnPassword: z.string().min(1, "PSN Password is required").optional(),
++    emailPassword: z.string().min(1, "Email Password is required").optional(),
++    onlineId: onlineIdSchema.optional(),
++    birthDate: birthDateSchema.optional(),
++    familyManagementEmail: emailSchema.optional(),
++    confirmed: z.boolean().optional().default(false),
++  })
++  .strict()
++  .refine(
++    (v) =>
++      [
++        "psnEmail",
++        "psnPassword",
++        "emailPassword",
++        "onlineId",
++        "birthDate",
++        "familyManagementEmail",
++      ].some((field) => v[field as keyof typeof v] !== undefined),
++    {
++      message: "At least one editable field is required; confirmed alone is not valid",
++    },
++  );
++
++export type UpdateAccountInput = z.infer<typeof UpdateAccountInput>;
++
++type ChangedLookupFields = {
++  psnEmail?: string;
++  familyManagementEmail?: string;
++  onlineId?: string;
++};
++
++async function acquireDuplicateLocksForUpdate(
++  client: DbClient,
++  changed: ChangedLookupFields,
++  keys: AccountKeys,
++): Promise<void> {
++  const tokens: bigint[] = [];
++  if (changed.psnEmail !== undefined) {
++    tokens.push(
++      deriveAdvisoryLockId(
++        hashForLookup(normalizeEmail(changed.psnEmail), keys.lookupHashKey),
++      ),
++    );
++  }
++  if (changed.familyManagementEmail !== undefined) {
++    tokens.push(
++      deriveAdvisoryLockId(
++        hashForLookup(
++          normalizeEmail(changed.familyManagementEmail),
++          keys.lookupHashKey,
++        ),
++      ),
++    );
++  }
++  if (changed.onlineId !== undefined) {
++    tokens.push(
++      deriveAdvisoryLockId(
++        hashForLookup(normalizeOnlineId(changed.onlineId), keys.lookupHashKey),
++      ),
++    );
++  }
++
++  const uniqueLockIds = [...new Set(tokens)].sort((a, b) =>
++    a < b ? -1 : a > b ? 1 : 0,
++  );
++  for (const lockId of uniqueLockIds) {
++    await client.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
++  }
++}
++
++async function findDuplicateFieldsForUpdate(
++  client: DbClient,
++  accountId: string,
++  changed: ChangedLookupFields,
++  keys: AccountKeys,
++): Promise<string[]> {
++  const duplicates: string[] = [];
++
++  if (changed.psnEmail !== undefined) {
++    const hash = hashForLookup(
++      normalizeEmail(changed.psnEmail),
++      keys.lookupHashKey,
++    );
++    const [match] = await client
++      .select({ id: accountsTable.id })
++      .from(accountsTable)
++      .where(
++        and(
++          eq(accountsTable.psnEmailLookupHash, hash),
++          isNull(accountsTable.deletedAt),
++          ne(accountsTable.id, accountId),
++        ),
++      )
++      .limit(1);
++    if (match) duplicates.push("psnEmail");
++  }
++
++  if (changed.familyManagementEmail !== undefined) {
++    const hash = hashForLookup(
++      normalizeEmail(changed.familyManagementEmail),
++      keys.lookupHashKey,
++    );
++    const [match] = await client
++      .select({ id: accountsTable.id })
++      .from(accountsTable)
++      .where(
++        and(
++          eq(accountsTable.familyManagementEmailLookupHash, hash),
++          isNull(accountsTable.deletedAt),
++          ne(accountsTable.id, accountId),
++        ),
++      )
++      .limit(1);
++    if (match) duplicates.push("familyManagementEmail");
++  }
++
++  if (changed.onlineId !== undefined) {
++    const normalized = normalizeOnlineId(changed.onlineId);
++    const [match] = await client
++      .select({ id: accountsTable.id })
++      .from(accountsTable)
++      .where(
++        and(
++          sql`LOWER(${accountsTable.onlineId}) = LOWER(${normalized})`,
++          isNull(accountsTable.deletedAt),
++          ne(accountsTable.id, accountId),
++        ),
++      )
++      .limit(1);
++    if (match) duplicates.push("onlineId");
++  }
++
++  return duplicates;
++}
++
++export async function updateAccount(
++  input: unknown,
++): Promise<UpdateAccountResult> {
++  const parsed = UpdateAccountInput.parse(input);
++  const keys = loadAccountMasterKey();
++
++  return db.transaction(async (tx) => {
++    const client = tx as unknown as DbClient;
++    const [account] = await client
++      .select()
++      .from(accountsTable)
++      .where(
++        and(
++          eq(accountsTable.id, parsed.accountId),
++          isNull(accountsTable.deletedAt),
++        ),
++      )
++      .limit(1)
++      .for("update");
++
++    if (!account) {
++      throw new AccountNotFoundError();
++    }
++
++    const updates: Partial<InsertAccount> = {};
++    const changedLookupFields: ChangedLookupFields = {};
++
++    if (parsed.psnEmail !== undefined) {
++      const normalized = normalizeEmail(parsed.psnEmail);
++      const newHash = hashForLookup(normalized, keys.lookupHashKey);
++      if (newHash !== account.psnEmailLookupHash) {
++        updates.psnEmailEncrypted = encrypt(normalized, keys.encryptionKey);
++        updates.psnEmailLookupHash = newHash;
++        changedLookupFields.psnEmail = normalized;
++      }
++    }
++
++    if (parsed.familyManagementEmail !== undefined) {
++      const normalized = normalizeEmail(parsed.familyManagementEmail);
++      const newHash = hashForLookup(normalized, keys.lookupHashKey);
++      if (newHash !== account.familyManagementEmailLookupHash) {
++        updates.familyManagementEmailEncryptedV2 = encrypt(
++          normalized,
++          keys.encryptionKey,
++        );
++        updates.familyManagementEmailLookupHash = newHash;
++        changedLookupFields.familyManagementEmail = normalized;
++      }
++    }
++
++    if (parsed.onlineId !== undefined) {
++      const normalized = normalizeOnlineId(parsed.onlineId);
++      if (
++        normalized.toLowerCase() !== (account.onlineId ?? "").toLowerCase()
++      ) {
++        updates.onlineId = normalized;
++        changedLookupFields.onlineId = normalized;
++      }
++    }
++
++    if (parsed.psnPassword !== undefined) {
++      const newHash = hashForLookup(parsed.psnPassword, keys.lookupHashKey);
++      if (newHash !== account.psnPasswordLookupHash) {
++        updates.psnPasswordEncrypted = encrypt(
++          parsed.psnPassword,
++          keys.encryptionKey,
++        );
++        updates.psnPasswordLookupHash = newHash;
++      }
++    }
++
++    if (parsed.emailPassword !== undefined) {
++      const newHash = hashForLookup(parsed.emailPassword, keys.lookupHashKey);
++      if (newHash !== account.emailPasswordLookupHash) {
++        updates.emailPasswordEncryptedV2 = encrypt(
++          parsed.emailPassword,
++          keys.encryptionKey,
++        );
++        updates.emailPasswordLookupHash = newHash;
++      }
++    }
++
++    if (
++      parsed.birthDate !== undefined &&
++      parsed.birthDate !== account.birthDate
++    ) {
++      updates.birthDate = parsed.birthDate;
++    }
++
++    const hasChangedLookup =
++      changedLookupFields.psnEmail !== undefined ||
++      changedLookupFields.familyManagementEmail !== undefined ||
++      changedLookupFields.onlineId !== undefined;
++
++    if (hasChangedLookup && !parsed.confirmed) {
++      await acquireDuplicateLocksForUpdate(client, changedLookupFields, keys);
++      const duplicates = await findDuplicateFieldsForUpdate(
++        client,
++        parsed.accountId,
++        changedLookupFields,
++        keys,
++      );
++      if (duplicates.length > 0) {
++        return { kind: "duplicate-warning", duplicateFields: duplicates };
++      }
++    }
++
++    if (Object.keys(updates).length > 0) {
++      updates.updatedAt = new Date();
++      await client
++        .update(accountsTable)
++        .set(updates)
++        .where(eq(accountsTable.id, parsed.accountId));
++    }
++
++    // Re-fetch to get the updated row and any DB-computed defaults.
++    const [updated] = await client
++      .select()
++      .from(accountsTable)
++      .where(eq(accountsTable.id, parsed.accountId))
++      .limit(1);
++
++    return {
++      kind: "updated",
++      account: toSafeAccount(updated),
++      statusOverride: updated.statusOverride,
++    };
++  });
++}
++
++export const SetAccountStatusOverrideInput = z
++  .object({
++    accountId: z.string().uuid(),
++    statusOverride: z.enum(["SOLD", "INACTIVE"]).nullable(),
++  })
++  .strict();
++
++export type SetAccountStatusOverrideInput = z.infer<
++  typeof SetAccountStatusOverrideInput
++>;
++
++export async function setAccountStatusOverride(
++  input: unknown,
++): Promise<{ kind: "updated"; account: SafeAccount; statusOverride: "SOLD" | "INACTIVE" | null }> {
++  const parsed = SetAccountStatusOverrideInput.parse(input);
++
++  return db.transaction(async (tx) => {
++    const client = tx as unknown as DbClient;
++    const [account] = await client
++      .select()
++      .from(accountsTable)
++      .where(
++        and(
++          eq(accountsTable.id, parsed.accountId),
++          isNull(accountsTable.deletedAt),
++        ),
++      )
++      .limit(1)
++      .for("update");
++
++    if (!account) {
++      throw new AccountNotFoundError();
++    }
++
++    const [updated] = await client
++      .update(accountsTable)
++      .set({ statusOverride: parsed.statusOverride, updatedAt: new Date() })
++      .where(eq(accountsTable.id, parsed.accountId))
++      .returning();
++
++    return {
++      kind: "updated",
++      account: toSafeAccount(updated),
++      statusOverride: updated.statusOverride,
++    };
++  });
++}
+diff --git a/docs/CURRENT_PHASE.md b/docs/CURRENT_PHASE.md
+index b5cd92c..6efe229 100644
+--- a/docs/CURRENT_PHASE.md
++++ b/docs/CURRENT_PHASE.md
+@@ -1,13 +1,13 @@
+-Previous completed sub-stage:
+-PS-03D5-3 — Create Account Backend, Runtime Disabled
+-
+-Previous sub-stage status:
+-APPROVED_AND_CLOSED
++Current stage:
++PS-03D5 — Account Mutation Implementation, Runtime Disabled
+ 
+ Current sub-stage:
+ PS-03D5-4 — Update and Status Override Backend, Runtime Disabled
+ 
+ Current status:
+-PS-03D5-4 — AWAITING COMMAND CENTER AUTHORIZATION TO START
++PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
++
++Next planned sub-stage:
++PS-03D5-5 — Delete Account Safety Boundary
+ 
+ Keep runtime activation deferred to PS-03D7.
+diff --git a/lib/api-client-react/src/generated/api.schemas.ts b/lib/api-client-react/src/generated/api.schemas.ts
+index 0a6b9a5..0530c95 100644
+--- a/lib/api-client-react/src/generated/api.schemas.ts
++++ b/lib/api-client-react/src/generated/api.schemas.ts
+@@ -175,6 +175,32 @@ export interface CreateAccountRequest {
+   confirmed?: boolean;
+ }
+ 
++export interface UpdateAccountRequest {
++  psnEmail?: string;
++  /** @minLength 1 */
++  psnPassword?: string;
++  /** @minLength 1 */
++  emailPassword?: string;
++  /** @minLength 1 */
++  onlineId?: string;
++  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
++  birthDate?: string;
++  familyManagementEmail?: string;
++  confirmed?: boolean;
++}
++
++export type SetAccountStatusOverrideRequestStatusOverride = typeof SetAccountStatusOverrideRequestStatusOverride[keyof typeof SetAccountStatusOverrideRequestStatusOverride] | null;
++
++
++export const SetAccountStatusOverrideRequestStatusOverride = {
++  SOLD: 'SOLD',
++  INACTIVE: 'INACTIVE',
++} as const;
++
++export interface SetAccountStatusOverrideRequest {
++  statusOverride: SetAccountStatusOverrideRequestStatusOverride;
++}
++
+ export type DuplicateWarningResponseCode = typeof DuplicateWarningResponseCode[keyof typeof DuplicateWarningResponseCode];
+ 
+ 
+diff --git a/lib/api-client-react/src/generated/api.ts b/lib/api-client-react/src/generated/api.ts
+index c509e23..f9a8262 100644
+--- a/lib/api-client-react/src/generated/api.ts
++++ b/lib/api-client-react/src/generated/api.ts
+@@ -32,7 +32,9 @@ import type {
+   HealthStatus,
+   OkResponse,
+   ReadinessStatus,
++  SetAccountStatusOverrideRequest,
+   StandardApiError,
++  UpdateAccountRequest,
+   UpdateGameRequest
+ } from './api.schemas';
+ 
+@@ -818,6 +820,78 @@ export function useGetAccount<TData = Awaited<ReturnType<typeof getAccount>>, TE
+ 
+ 
+ 
++export const getUpdateAccountUrl = (accountId: string,) => {
++
++
++
++
++  return `/api/accounts/${accountId}`
++}
++
++/**
++ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
++ * @summary Update an account
++ */
++export const updateAccount = async (accountId: string,
++    updateAccountRequest: UpdateAccountRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
++
++  return customFetch<AccountDetailResponse>(getUpdateAccountUrl(accountId),
++  {
++    ...options,
++    method: 'PATCH',
++    headers: { 'Content-Type': 'application/json', ...options?.headers },
++    body: JSON.stringify(updateAccountRequest)
++  }
++);}
++
++
++
++
++export const getUpdateAccountMutationOptions = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
++): UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext> => {
++
++const mutationKey = ['updateAccount'];
++const {mutation: mutationOptions, request: requestOptions} = options ?
++      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
++      options
++      : {...options, mutation: {...options.mutation, mutationKey}}
++      : {mutation: { mutationKey, }, request: undefined};
++
++
++
++
++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateAccount>>, {accountId: string;data: BodyType<UpdateAccountRequest>}> = (props) => {
++          const {accountId,data} = props ?? {};
++
++          return  updateAccount(accountId,data,requestOptions)
++        }
++
++
++
++
++
++
++  return  { mutationFn, ...mutationOptions }}
++
++    export type UpdateAccountMutationResult = NonNullable<Awaited<ReturnType<typeof updateAccount>>>
++    export type UpdateAccountMutationBody = BodyType<UpdateAccountRequest>
++    export type UpdateAccountMutationError = ErrorType<StandardApiError | DuplicateWarningResponse>
++
++    /**
++ * @summary Update an account
++ */
++export const useUpdateAccount = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
++ ): UseMutationResult<
++        Awaited<ReturnType<typeof updateAccount>>,
++        TError,
++        {accountId: string;data: BodyType<UpdateAccountRequest>},
++        TContext
++      > => {
++      return useMutation(getUpdateAccountMutationOptions(options));
++    }
++
+ export const getGetAccountCapacitiesUrl = (accountId: string,) => {
+ 
+ 
+@@ -896,3 +970,75 @@ export function useGetAccountCapacities<TData = Awaited<ReturnType<typeof getAcc
+ 
+ 
+ 
++export const getSetAccountStatusOverrideUrl = (accountId: string,) => {
++
++
++
++
++  return `/api/accounts/${accountId}/status-override`
++}
++
++/**
++ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
++ * @summary Set account status override
++ */
++export const setAccountStatusOverride = async (accountId: string,
++    setAccountStatusOverrideRequest: SetAccountStatusOverrideRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
++
++  return customFetch<AccountDetailResponse>(getSetAccountStatusOverrideUrl(accountId),
++  {
++    ...options,
++    method: 'PATCH',
++    headers: { 'Content-Type': 'application/json', ...options?.headers },
++    body: JSON.stringify(setAccountStatusOverrideRequest)
++  }
++);}
++
++
++
++
++export const getSetAccountStatusOverrideMutationOptions = <TError = ErrorType<StandardApiError>,
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
++): UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext> => {
++
++const mutationKey = ['setAccountStatusOverride'];
++const {mutation: mutationOptions, request: requestOptions} = options ?
++      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
++      options
++      : {...options, mutation: {...options.mutation, mutationKey}}
++      : {mutation: { mutationKey, }, request: undefined};
++
++
++
++
++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof setAccountStatusOverride>>, {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}> = (props) => {
++          const {accountId,data} = props ?? {};
++
++          return  setAccountStatusOverride(accountId,data,requestOptions)
++        }
++
++
++
++
++
++
++  return  { mutationFn, ...mutationOptions }}
++
++    export type SetAccountStatusOverrideMutationResult = NonNullable<Awaited<ReturnType<typeof setAccountStatusOverride>>>
++    export type SetAccountStatusOverrideMutationBody = BodyType<SetAccountStatusOverrideRequest>
++    export type SetAccountStatusOverrideMutationError = ErrorType<StandardApiError>
++
++    /**
++ * @summary Set account status override
++ */
++export const useSetAccountStatusOverride = <TError = ErrorType<StandardApiError>,
++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
++ ): UseMutationResult<
++        Awaited<ReturnType<typeof setAccountStatusOverride>>,
++        TError,
++        {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>},
++        TContext
++      > => {
++      return useMutation(getSetAccountStatusOverrideMutationOptions(options));
++    }
++
+diff --git a/lib/api-spec/openapi.yaml b/lib/api-spec/openapi.yaml
+index 91d7dc0..c7d9e20 100644
+--- a/lib/api-spec/openapi.yaml
++++ b/lib/api-spec/openapi.yaml
+@@ -379,6 +379,65 @@ paths:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/StandardApiError'
++    patch:
++      operationId: updateAccount
++      tags:
++        - accounts
++      summary: Update an account
++      description: >-
++        Updates editable Account fields. Immutable fields, Backup Codes, and
++        Capacities cannot be changed. Duplicate values against other Accounts may
++        be accepted by sending `confirmed: true`.
++      parameters:
++        - name: accountId
++          in: path
++          required: true
++          schema:
++            type: string
++            format: uuid
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: '#/components/schemas/UpdateAccountRequest'
++      responses:
++        '200':
++          description: Account updated
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/AccountDetailResponse'
++        '400':
++          description: Validation failure
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '403':
++          description: Account operations disabled in the mounted runtime
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '404':
++          description: Account not found
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '409':
++          description: Duplicate warning
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/DuplicateWarningResponse'
++        '500':
++          description: Unexpected or encryption configuration failure
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
+   /accounts/{accountId}/capacities:
+     get:
+       operationId: getAccountCapacities
+@@ -418,6 +477,60 @@ paths:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/StandardApiError'
++  /accounts/{accountId}/status-override:
++    patch:
++      operationId: setAccountStatusOverride
++      tags:
++        - accounts
++      summary: Set account status override
++      description: >-
++        Sets, changes, or clears the Account status override. Accepted values are
++        SOLD, INACTIVE, or null. The response includes the recalculated canonical
++        Account status. Capacities and Customer Assignments are not modified.
++      parameters:
++        - name: accountId
++          in: path
++          required: true
++          schema:
++            type: string
++            format: uuid
++      requestBody:
++        required: true
++        content:
++          application/json:
++            schema:
++              $ref: '#/components/schemas/SetAccountStatusOverrideRequest'
++      responses:
++        '200':
++          description: Account status override updated
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/AccountDetailResponse'
++        '400':
++          description: Validation failure
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '403':
++          description: Account operations disabled in the mounted runtime
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '404':
++          description: Account not found
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
++        '500':
++          description: Unexpected error
++          content:
++            application/json:
++              schema:
++                $ref: '#/components/schemas/StandardApiError'
+ components:
+   schemas:
+     HealthStatus:
+@@ -729,6 +842,43 @@ components:
+         - birthDate
+         - familyManagementEmail
+         - backupCodes
++    UpdateAccountRequest:
++      type: object
++      properties:
++        psnEmail:
++          type: string
++          format: email
++        psnPassword:
++          type: string
++          minLength: 1
++        emailPassword:
++          type: string
++          minLength: 1
++        onlineId:
++          type: string
++          minLength: 1
++        birthDate:
++          type: string
++          pattern: ^\d{4}-\d{2}-\d{2}$
++        familyManagementEmail:
++          type: string
++          format: email
++        confirmed:
++          type: boolean
++          default: false
++      additionalProperties: false
++    SetAccountStatusOverrideRequest:
++      type: object
++      properties:
++        statusOverride:
++          type: string
++          nullable: true
++          enum:
++            - SOLD
++            - INACTIVE
++      required:
++        - statusOverride
++      additionalProperties: false
+     DuplicateWarningResponse:
+       type: object
+       properties:
+diff --git a/lib/api-zod/src/generated/api.ts b/lib/api-zod/src/generated/api.ts
+index 91b7955..c2d11f7 100644
+--- a/lib/api-zod/src/generated/api.ts
++++ b/lib/api-zod/src/generated/api.ts
+@@ -269,6 +269,57 @@ export const GetAccountResponse = zod.object({
+ })
+ 
+ 
++/**
++ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
++ * @summary Update an account
++ */
++export const UpdateAccountParams = zod.object({
++  "accountId": zod.coerce.string().uuid()
++})
++
++
++
++
++export const updateAccountBodyBirthDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
++export const updateAccountBodyConfirmedDefault = false;
++
++export const UpdateAccountBody = zod.object({
++  "psnEmail": zod.string().email().optional(),
++  "psnPassword": zod.string().min(1).optional(),
++  "emailPassword": zod.string().min(1).optional(),
++  "onlineId": zod.string().min(1).optional(),
++  "birthDate": zod.string().regex(updateAccountBodyBirthDateRegExp).optional(),
++  "familyManagementEmail": zod.string().email().optional(),
++  "confirmed": zod.boolean().default(updateAccountBodyConfirmedDefault)
++})
++
++export const UpdateAccountResponse = zod.object({
++  "account": zod.object({
++  "id": zod.string().uuid(),
++  "gameId": zod.string().uuid(),
++  "accountCode": zod.string(),
++  "accountNumberPrefix": zod.string(),
++  "accountNumberSeq": zod.number(),
++  "displayNumber": zod.string(),
++  "onlineId": zod.string().nullable(),
++  "birthDate": zod.string().nullable(),
++  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
++  "createdAt": zod.coerce.date(),
++  "updatedAt": zod.coerce.date()
++}).and(zod.object({
++  "capacities": zod.array(zod.object({
++  "id": zod.string().uuid(),
++  "accountId": zod.string().uuid(),
++  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
++  "instanceNo": zod.number(),
++  "displayLabel": zod.string(),
++  "isFinished": zod.boolean(),
++  "finishedAt": zod.coerce.date().nullable()
++}))
++}))
++})
++
++
+ /**
+  * Returns Capacity rows and derived Account status information required by the Account workspace.
+  * @summary Get account capacities
+@@ -291,3 +342,42 @@ export const GetAccountCapacitiesResponse = zod.object({
+ })
+ 
+ 
++/**
++ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
++ * @summary Set account status override
++ */
++export const SetAccountStatusOverrideParams = zod.object({
++  "accountId": zod.coerce.string().uuid()
++})
++
++export const SetAccountStatusOverrideBody = zod.object({
++  "statusOverride": zod.enum(['SOLD', 'INACTIVE']).nullable()
++})
++
++export const SetAccountStatusOverrideResponse = zod.object({
++  "account": zod.object({
++  "id": zod.string().uuid(),
++  "gameId": zod.string().uuid(),
++  "accountCode": zod.string(),
++  "accountNumberPrefix": zod.string(),
++  "accountNumberSeq": zod.number(),
++  "displayNumber": zod.string(),
++  "onlineId": zod.string().nullable(),
++  "birthDate": zod.string().nullable(),
++  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
++  "createdAt": zod.coerce.date(),
++  "updatedAt": zod.coerce.date()
++}).and(zod.object({
++  "capacities": zod.array(zod.object({
++  "id": zod.string().uuid(),
++  "accountId": zod.string().uuid(),
++  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
++  "instanceNo": zod.number(),
++  "displayLabel": zod.string(),
++  "isFinished": zod.boolean(),
++  "finishedAt": zod.coerce.date().nullable()
++}))
++}))
++})
++
++
+diff --git a/lib/api-zod/src/generated/types/index.ts b/lib/api-zod/src/generated/types/index.ts
+index 0582aaa..122eca3 100644
+--- a/lib/api-zod/src/generated/types/index.ts
++++ b/lib/api-zod/src/generated/types/index.ts
+@@ -32,6 +32,9 @@ export * from './healthStatus';
+ export * from './okResponse';
+ export * from './readinessStatus';
+ export * from './readinessStatusChecks';
++export * from './setAccountStatusOverrideRequest';
++export * from './setAccountStatusOverrideRequestStatusOverride';
+ export * from './standardApiError';
+ export * from './standardApiErrorIssuesItem';
++export * from './updateAccountRequest';
+ export * from './updateGameRequest';
+diff --git a/lib/db/src/index.ts b/lib/db/src/index.ts
+index b8bf97a..e3ee6ba 100644
+--- a/lib/db/src/index.ts
++++ b/lib/db/src/index.ts
+@@ -4,13 +4,106 @@ import * as schema from "./schema/index.ts";
+ 
+ const { Pool } = pg;
+ 
+-if (!process.env.DATABASE_URL) {
+-  throw new Error(
+-    "DATABASE_URL must be set. Did you forget to provision a database?",
+-  );
++function getDatabaseUrl(): string {
++  if (!process.env.DATABASE_URL) {
++    throw new Error(
++      "DATABASE_URL must be set. Did you forget to provision a database?",
++    );
++  }
++  return process.env.DATABASE_URL;
+ }
+ 
+-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+-export const db = drizzle(pool, { schema });
++let poolInstance: pg.Pool | null = null;
++let dbInstance: ReturnType<typeof drizzle<typeof schema>> | null = null;
++
++function getPool(): pg.Pool {
++  if (!poolInstance) {
++    poolInstance = new Pool({ connectionString: getDatabaseUrl() });
++  }
++  return poolInstance;
++}
++
++function getDb(): ReturnType<typeof drizzle<typeof schema>> {
++  if (!dbInstance) {
++    dbInstance = drizzle(getPool(), { schema });
++  }
++  return dbInstance;
++}
++
++/** Lazy database connection pool; initialized on first access. */
++export const pool = new Proxy({} as pg.Pool, {
++  get(_target, prop, receiver) {
++    return Reflect.get(getPool(), prop, receiver);
++  },
++  has(_target, prop) {
++    return Reflect.has(getPool(), prop);
++  },
++  ownKeys(_target) {
++    return Reflect.ownKeys(getPool());
++  },
++  getOwnPropertyDescriptor(_target, prop) {
++    return Reflect.getOwnPropertyDescriptor(getPool(), prop);
++  },
++  set(_target, prop, value, receiver) {
++    return Reflect.set(getPool(), prop, value, receiver);
++  },
++  defineProperty(_target, prop, attrs) {
++    return Reflect.defineProperty(getPool(), prop, attrs);
++  },
++  deleteProperty(_target, prop) {
++    return Reflect.deleteProperty(getPool(), prop);
++  },
++  apply(_target, thisArg, args) {
++    return (getPool() as unknown as (...args: unknown[]) => unknown).apply(
++      thisArg,
++      args,
++    );
++  },
++  construct(_target, args, newTarget) {
++    return Reflect.construct(
++      getPool() as unknown as new (...args: unknown[]) => unknown,
++      args,
++      newTarget,
++    );
++  },
++}) as pg.Pool;
++
++/** Lazy Drizzle ORM instance; initialized on first access. */
++export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
++  get(_target, prop, receiver) {
++    return Reflect.get(getDb(), prop, receiver);
++  },
++  has(_target, prop) {
++    return Reflect.has(getDb(), prop);
++  },
++  ownKeys(_target) {
++    return Reflect.ownKeys(getDb());
++  },
++  getOwnPropertyDescriptor(_target, prop) {
++    return Reflect.getOwnPropertyDescriptor(getDb(), prop);
++  },
++  set(_target, prop, value, receiver) {
++    return Reflect.set(getDb(), prop, value, receiver);
++  },
++  defineProperty(_target, prop, attrs) {
++    return Reflect.defineProperty(getDb(), prop, attrs);
++  },
++  deleteProperty(_target, prop) {
++    return Reflect.deleteProperty(getDb(), prop);
++  },
++  apply(_target, thisArg, args) {
++    return (getDb() as unknown as (...args: unknown[]) => unknown).apply(
++      thisArg,
++      args,
++    );
++  },
++  construct(_target, args, newTarget) {
++    return Reflect.construct(
++      getDb() as unknown as new (...args: unknown[]) => unknown,
++      args,
++      newTarget,
++    );
++  },
++});
+ 
+ export * from "./schema/index.ts";
+
+=== new file: artifacts/api-server/src/routes/accounts.status-override.test.ts ===
+diff --git a/artifacts/api-server/src/routes/accounts.status-override.test.ts b/artifacts/api-server/src/routes/accounts.status-override.test.ts
+new file mode 100644
+index 0000000..6ff6d03
+--- /dev/null
++++ b/artifacts/api-server/src/routes/accounts.status-override.test.ts
+@@ -0,0 +1,354 @@
++import { describe, it, before, after } from "node:test";
++import assert from "node:assert";
++import express, { type Express } from "express";
++import net from "node:net";
++import { eq, sql } from "drizzle-orm";
++import { startTestPg, startApiServer } from "../lib/test-pg.ts";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++import { execSync } from "node:child_process";
++import { errorHandler } from "../middlewares/error-handler.ts";
++import { setAccountStatusOverrideHandler } from "./accounts.ts";
++import { p } from "../lib/req-param.ts";
++import { createAccount as createAccountService } from "../services/account/index.ts";
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
++
++const TEST_MASTER_KEY = Buffer.from(
++  "0123456789abcdef0123456789abcdef",
++  "utf8",
++).toString("base64");
++
++let idCounter = 0;
++function nextId(): string {
++  idCounter += 1;
++  return `${Date.now()}_${idCounter}_${Math.random().toString(36).slice(2, 7)}`;
++}
++
++function createRequest(overrides: Record<string, unknown> = {}) {
++  return {
++    psnEmail: `test-${nextId()}@example.com`,
++    psnPassword: "psn-secret",
++    emailPassword: "email-secret",
++    onlineId: `TestOnlineId${nextId()}`,
++    birthDate: "1990-01-01",
++    familyManagementEmail: `family-${nextId()}@example.com`,
++    backupCodes: ["code1", "code2"],
++    ...overrides,
++  };
++}
++
++function buildTestApp(): Express {
++  const app = express();
++  app.use(express.json());
++  app.patch("/accounts/:id/status-override", (req, res, next) => {
++    const id = p(req.params["id"]);
++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
++      res.status(400).json({ error: "id must be a valid UUID", code: "VALIDATION_ERROR" });
++      return;
++    }
++    setAccountStatusOverrideHandler(req, res, next);
++  });
++  app.use(errorHandler);
++  return app;
++}
++
++describe("Set Account Status Override handler", { concurrency: 1 }, () => {
++  let databaseUrl: string;
++  let stopPg: () => Promise<void>;
++  let db: typeof import("@workspace/db");
++
++  let publicBaseUrl: string;
++  let stopPublicServer: () => Promise<void>;
++  let testApp: Express;
++  let testServer: ReturnType<typeof express.application.listen>;
++  let testPort: number;
++
++  before(async () => {
++    const { databaseUrl: dbUrl, stop: stopPgFn } = await startTestPg();
++    databaseUrl = dbUrl;
++    stopPg = stopPgFn;
++
++    process.env.DATABASE_URL = databaseUrl;
++    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
++
++    execSync("pnpm run build", {
++      cwd: path.resolve(__dirname, "..", ".."),
++      env: {
++        ...process.env,
++        PORT: "8080",
++        BASE_PATH: "/api-server",
++      },
++      stdio: "ignore",
++    });
++
++    const { baseUrl: serverUrl, stop: stopServerFn } = await startApiServer(
++      databaseUrl,
++      DIST_DIR,
++    );
++    publicBaseUrl = serverUrl;
++    stopPublicServer = stopServerFn;
++
++    db = await import("@workspace/db");
++
++    testApp = buildTestApp();
++    testPort = await getFreePort();
++    testServer = testApp.listen(testPort);
++  });
++
++  after(async () => {
++    if (testServer) {
++      testServer.close();
++    }
++    await stopPublicServer();
++    if (db) {
++      await db.pool.end();
++    }
++    await stopPg();
++  });
++
++  function statusOverrideUrl(accountId: string): string {
++    return `http://localhost:${testPort}/accounts/${accountId}/status-override`;
++  }
++
++  async function createGame(
++    title: string,
++    platform: "PS5_ONLY" | "PS4_AND_PS5" | "PS4_ONLY" = "PS5_ONLY",
++  ) {
++    const uniqueTitle = `${title} ${nextId()}`;
++    const [game] = await db.db
++      .insert(db.gamesTable)
++      .values({
++        title: uniqueTitle,
++        titleNormalized: uniqueTitle.toLowerCase().trim(),
++        platform,
++        status: "ACTIVE",
++      })
++      .returning();
++    return game;
++  }
++
++  async function createAccount(gameId: string) {
++    const result = await createAccountService({
++      ...createRequest(),
++      gameId,
++    });
++    assert.strictEqual(result.kind, "created");
++    if (result.kind !== "created") throw new Error("failed to create account");
++    return result.account.id;
++  }
++
++  async function countRows(table: unknown): Promise<number> {
++    const [row] = (await db.db
++      .select({ count: sql`count(*)::int` })
++      .from(table as never)) as { count: number }[];
++    return row.count;
++  }
++
++  async function getRowCounts() {
++    return {
++      accounts: await countRows(db.accountsTable),
++      capacities: await countRows(db.accountCapacitiesTable),
++      backupCodes: await countRows(db.accountBackupCodesTable),
++    };
++  }
++
++  async function getAccountCapacities(accountId: string) {
++    return db.db
++      .select()
++      .from(db.accountCapacitiesTable)
++      .where(eq(db.accountCapacitiesTable.accountId, accountId))
++      .orderBy(
++        db.accountCapacitiesTable.capacityKindV2,
++        db.accountCapacitiesTable.instanceNo,
++      );
++  }
++
++  it("public PATCH /accounts/:id/status-override returns 403 and writes nothing", async () => {
++    const game = await createGame("Disabled Public Status Override Game");
++    const accountId = await createAccount(game.id);
++    const before = await getRowCounts();
++
++    const res = await fetch(
++      `${publicBaseUrl}/accounts/${accountId}/status-override`,
++      {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ statusOverride: "SOLD" }),
++      },
++    );
++    assert.strictEqual(res.status, 403);
++    const data = (await res.json()) as { error: string; code: string };
++    assert.strictEqual(data.error, "Account operations are not authorized");
++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
++
++    const after = await getRowCounts();
++    assert.strictEqual(after.accounts, before.accounts);
++    assert.strictEqual(after.capacities, before.capacities);
++    assert.strictEqual(after.backupCodes, before.backupCodes);
++  });
++
++  it("SOLD override succeeds and returns the recalculated status", async () => {
++    const game = await createGame("Status Override SOLD Game");
++    const accountId = await createAccount(game.id);
++
++    const res = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(res.status, 200);
++    const data = (await res.json()) as { account: { status: string } };
++    assert.strictEqual(data.account.status, "SOLD");
++  });
++
++  it("INACTIVE override succeeds and returns the recalculated status", async () => {
++    const game = await createGame("Status Override INACTIVE Game");
++    const accountId = await createAccount(game.id);
++
++    const res = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "INACTIVE" }),
++    });
++    assert.strictEqual(res.status, 200);
++    const data = (await res.json()) as { account: { status: string } };
++    assert.strictEqual(data.account.status, "INACTIVE");
++  });
++
++  it("null clears the override and restores the derived status", async () => {
++    const game = await createGame("Status Override Clear Game");
++    const accountId = await createAccount(game.id);
++
++    const soldRes = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(soldRes.status, 200);
++
++    const clearRes = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: null }),
++    });
++    assert.strictEqual(clearRes.status, 200);
++    const data = (await clearRes.json()) as { account: { status: string } };
++    assert.strictEqual(data.account.status, "AVAILABLE");
++  });
++
++  it("AVAILABLE and PARTIALLY_SOLD are rejected", async () => {
++    const game = await createGame("Status Override Reject Game");
++    const accountId = await createAccount(game.id);
++
++    for (const statusOverride of ["AVAILABLE", "PARTIALLY_SOLD"]) {
++      const res = await fetch(statusOverrideUrl(accountId), {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ statusOverride }),
++      });
++      assert.strictEqual(
++        res.status,
++        400,
++        `expected 400 for statusOverride=${statusOverride}`,
++      );
++    }
++  });
++
++  it("rejects unknown fields", async () => {
++    const game = await createGame("Status Override Unknown Field Game");
++    const accountId = await createAccount(game.id);
++
++    const res = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD", unknownField: "value" }),
++    });
++    assert.strictEqual(res.status, 400);
++  });
++
++  it("returns 404 for missing or deleted Account", async () => {
++    const res = await fetch(
++      `http://localhost:${testPort}/accounts/550e8400-e29b-41d4-a716-446655440000/status-override`,
++      {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ statusOverride: "SOLD" }),
++      },
++    );
++    assert.strictEqual(res.status, 404);
++
++    const game = await createGame("Status Override Deleted Account Game");
++    const accountId = await createAccount(game.id);
++    await db.db
++      .update(db.accountsTable)
++      .set({ deletedAt: new Date() })
++      .where(eq(db.accountsTable.id, accountId));
++
++    const deletedRes = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(deletedRes.status, 404);
++  });
++
++  it("Capacities remain unchanged", async () => {
++    const game = await createGame("Status Override Capacities Game");
++    const accountId = await createAccount(game.id);
++    const beforeCapacities = await getAccountCapacities(accountId);
++
++    const res = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const afterCapacities = await getAccountCapacities(accountId);
++    assert.deepStrictEqual(
++      afterCapacities.map((c) => ({
++        id: c.id,
++        isFinished: c.isFinished,
++      })),
++      beforeCapacities.map((c) => ({ id: c.id, isFinished: c.isFinished })),
++    );
++  });
++
++  it("derived status is correct after clearing", async () => {
++    const game = await createGame("Status Override Derived Game");
++    const accountId = await createAccount(game.id);
++
++    const soldRes = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: "SOLD" }),
++    });
++    assert.strictEqual(soldRes.status, 200);
++    const soldData = (await soldRes.json()) as { account: { status: string } };
++    assert.strictEqual(soldData.account.status, "SOLD");
++
++    const clearRes = await fetch(statusOverrideUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ statusOverride: null }),
++    });
++    assert.strictEqual(clearRes.status, 200);
++    const clearData = (await clearRes.json()) as { account: { status: string } };
++    assert.strictEqual(clearData.account.status, "AVAILABLE");
++  });
++});
++
++function getFreePort(): Promise<number> {
++  return new Promise((resolve, reject) => {
++    const server = net.createServer();
++    server.listen(0, "127.0.0.1", () => {
++      const address = server.address();
++      const port =
++        typeof address === "object" && address !== null ? address.port : 0;
++      server.close(() => resolve(port));
++    });
++    server.on("error", reject);
++  });
++}
+
+=== new file: artifacts/api-server/src/routes/accounts.update.test.ts ===
+diff --git a/artifacts/api-server/src/routes/accounts.update.test.ts b/artifacts/api-server/src/routes/accounts.update.test.ts
+new file mode 100644
+index 0000000..299bd72
+--- /dev/null
++++ b/artifacts/api-server/src/routes/accounts.update.test.ts
+@@ -0,0 +1,636 @@
++import { describe, it, before, after } from "node:test";
++import assert from "node:assert";
++import express, { type Express } from "express";
++import net from "node:net";
++import { eq, sql } from "drizzle-orm";
++import { startTestPg, startApiServer } from "../lib/test-pg.ts";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++import { execSync } from "node:child_process";
++import { errorHandler } from "../middlewares/error-handler.ts";
++import { updateAccountHandler, createAccountHandler } from "./accounts.ts";
++import { p } from "../lib/req-param.ts";
++import { decrypt } from "../lib/crypto.ts";
++import {
++  loadAccountMasterKey,
++  createAccount as createAccountService,
++  updateAccount as updateAccountService,
++} from "../services/account/index.ts";
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
++
++const TEST_MASTER_KEY = Buffer.from(
++  "0123456789abcdef0123456789abcdef",
++  "utf8",
++).toString("base64");
++
++let idCounter = 0;
++function nextId(): string {
++  idCounter += 1;
++  return `${Date.now()}_${idCounter}_${Math.random().toString(36).slice(2, 7)}`;
++}
++
++function createRequest(overrides: Record<string, unknown> = {}) {
++  return {
++    psnEmail: `test-${nextId()}@example.com`,
++    psnPassword: "psn-secret",
++    emailPassword: "email-secret",
++    onlineId: `TestOnlineId${nextId()}`,
++    birthDate: "1990-01-01",
++    familyManagementEmail: `family-${nextId()}@example.com`,
++    backupCodes: ["code1", "code2"],
++    ...overrides,
++  };
++}
++
++function buildTestApp(): Express {
++  const app = express();
++  app.use(express.json());
++  app.post("/games/:gameId/accounts", (req, res, next) => {
++    const gameId = p(req.params["gameId"]);
++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(gameId)) {
++      res.status(400).json({ error: "gameId must be a valid UUID", code: "VALIDATION_ERROR" });
++      return;
++    }
++    createAccountHandler(req, res, next);
++  });
++  app.patch("/accounts/:id", (req, res, next) => {
++    const id = p(req.params["id"]);
++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
++      res.status(400).json({ error: "id must be a valid UUID", code: "VALIDATION_ERROR" });
++      return;
++    }
++    updateAccountHandler(req, res, next);
++  });
++  app.use(errorHandler);
++  return app;
++}
++
++describe("Update Account handler", { concurrency: 1 }, () => {
++  let databaseUrl: string;
++  let stopPg: () => Promise<void>;
++  let db: typeof import("@workspace/db");
++
++  let publicBaseUrl: string;
++  let stopPublicServer: () => Promise<void>;
++  let testApp: Express;
++  let testServer: ReturnType<typeof express.application.listen>;
++  let testPort: number;
++
++  before(async () => {
++    const { databaseUrl: dbUrl, stop: stopPgFn } = await startTestPg();
++    databaseUrl = dbUrl;
++    stopPg = stopPgFn;
++
++    process.env.DATABASE_URL = databaseUrl;
++    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
++
++    execSync("pnpm run build", {
++      cwd: path.resolve(__dirname, "..", ".."),
++      env: {
++        ...process.env,
++        PORT: "8080",
++        BASE_PATH: "/api-server",
++      },
++      stdio: "ignore",
++    });
++
++    const { baseUrl: serverUrl, stop: stopServerFn } = await startApiServer(
++      databaseUrl,
++      DIST_DIR,
++    );
++    publicBaseUrl = serverUrl;
++    stopPublicServer = stopServerFn;
++
++    db = await import("@workspace/db");
++
++    testApp = buildTestApp();
++    testPort = await getFreePort();
++    testServer = testApp.listen(testPort);
++  });
++
++  after(async () => {
++    if (testServer) {
++      testServer.close();
++    }
++    await stopPublicServer();
++    if (db) {
++      await db.pool.end();
++    }
++    await stopPg();
++  });
++
++  function createUrl(gameId: string): string {
++    return `http://localhost:${testPort}/games/${gameId}/accounts`;
++  }
++
++  function updateUrl(accountId: string): string {
++    return `http://localhost:${testPort}/accounts/${accountId}`;
++  }
++
++  async function createGame(
++    title: string,
++    platform: "PS5_ONLY" | "PS4_AND_PS5" | "PS4_ONLY" = "PS5_ONLY",
++  ) {
++    const uniqueTitle = `${title} ${nextId()}`;
++    const [game] = await db.db
++      .insert(db.gamesTable)
++      .values({
++        title: uniqueTitle,
++        titleNormalized: uniqueTitle.toLowerCase().trim(),
++        platform,
++        status: "ACTIVE",
++      })
++      .returning();
++    return game;
++  }
++
++  async function createAccount(gameId: string) {
++    const res = await fetch(createUrl(gameId), {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(createRequest()),
++    });
++    assert.strictEqual(res.status, 201);
++    const data = (await res.json()) as { account: { id: string } };
++    return data.account.id;
++  }
++
++  async function countRows(table: unknown): Promise<number> {
++    const [row] = (await db.db
++      .select({ count: sql`count(*)::int` })
++      .from(table as never)) as { count: number }[];
++    return row.count;
++  }
++
++  async function getRowCounts() {
++    return {
++      accounts: await countRows(db.accountsTable),
++      capacities: await countRows(db.accountCapacitiesTable),
++      backupCodes: await countRows(db.accountBackupCodesTable),
++    };
++  }
++
++  async function getAccountCapacities(accountId: string) {
++    return db.db
++      .select()
++      .from(db.accountCapacitiesTable)
++      .where(eq(db.accountCapacitiesTable.accountId, accountId))
++      .orderBy(
++        db.accountCapacitiesTable.capacityKindV2,
++        db.accountCapacitiesTable.instanceNo,
++      );
++  }
++
++  async function getBackupCodes(accountId: string) {
++    return db.db
++      .select()
++      .from(db.accountBackupCodesTable)
++      .where(eq(db.accountBackupCodesTable.accountId, accountId));
++  }
++
++  async function loadAccountRow(accountId: string) {
++    const [row] = await db.db
++      .select()
++      .from(db.accountsTable)
++      .where(eq(db.accountsTable.id, accountId))
++      .limit(1);
++    return row;
++  }
++
++  it("public PATCH /accounts/:id returns 403 and writes nothing", async () => {
++    const game = await createGame("Disabled Public Update Game");
++    const accountId = await createAccount(game.id);
++    const before = await getRowCounts();
++
++    const res = await fetch(`${publicBaseUrl}/accounts/${accountId}`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: "NewOnlineId" }),
++    });
++    assert.strictEqual(res.status, 403);
++    const data = (await res.json()) as { error: string; code: string };
++    assert.strictEqual(data.error, "Account operations are not authorized");
++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
++
++    const after = await getRowCounts();
++    assert.strictEqual(after.accounts, before.accounts);
++    assert.strictEqual(after.capacities, before.capacities);
++    assert.strictEqual(after.backupCodes, before.backupCodes);
++  });
++
++  it("updates non-sensitive fields and returns safe AccountDetailResponse", async () => {
++    const game = await createGame("Update Non-Sensitive Game");
++    const accountId = await createAccount(game.id);
++
++    const uniqueOnlineId = `UpdatedOnlineId${nextId()}`;
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: uniqueOnlineId, birthDate: "1995-05-05" }),
++    });
++    assert.strictEqual(res.status, 200);
++    const data = (await res.json()) as { account: Record<string, unknown> };
++    assert.strictEqual(data.account.onlineId, uniqueOnlineId);
++    assert.strictEqual(data.account.birthDate, "1995-05-05");
++    assert.strictEqual(data.account.status, "AVAILABLE");
++    assert.ok(Array.isArray(data.account.capacities));
++    assertNoSecrets(JSON.stringify(data));
++  });
++
++  it("updates sensitive fields and re-encrypts them", async () => {
++    const game = await createGame("Update Sensitive Game");
++    const accountId = await createAccount(game.id);
++    const keys = loadAccountMasterKey();
++
++    const uniquePsnEmail = `updated-psn-${nextId()}@example.com`;
++    const uniqueFamilyEmail = `updated-family-${nextId()}@example.com`;
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        psnEmail: uniquePsnEmail,
++        familyManagementEmail: uniqueFamilyEmail,
++        psnPassword: "updated-psn-password",
++        emailPassword: "updated-email-password",
++      }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const row = await loadAccountRow(accountId);
++    assert.strictEqual(
++      decrypt(row.psnEmailEncrypted as string, keys.encryptionKey),
++      uniquePsnEmail,
++    );
++    assert.strictEqual(
++      decrypt(row.familyManagementEmailEncryptedV2 as string, keys.encryptionKey),
++      uniqueFamilyEmail,
++    );
++    assert.strictEqual(
++      decrypt(row.psnPasswordEncrypted as string, keys.encryptionKey),
++      "updated-psn-password",
++    );
++    assert.strictEqual(
++      decrypt(row.emailPasswordEncryptedV2 as string, keys.encryptionKey),
++      "updated-email-password",
++    );
++  });
++
++  it("omitted fields remain unchanged", async () => {
++    const game = await createGame("Update Omitted Game");
++    const accountId = await createAccount(game.id);
++    const before = await loadAccountRow(accountId);
++
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ birthDate: "2000-01-01" }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const after = await loadAccountRow(accountId);
++    assert.strictEqual(after.psnEmailEncrypted, before.psnEmailEncrypted);
++    assert.strictEqual(
++      after.familyManagementEmailEncryptedV2,
++      before.familyManagementEmailEncryptedV2,
++    );
++    assert.strictEqual(after.psnPasswordEncrypted, before.psnPasswordEncrypted);
++    assert.strictEqual(
++      after.emailPasswordEncryptedV2,
++      before.emailPasswordEncryptedV2,
++    );
++    assert.strictEqual(after.onlineId, before.onlineId);
++    assert.strictEqual(after.birthDate, "2000-01-01");
++  });
++
++  it("rejects immutable and unknown fields", async () => {
++    const game = await createGame("Update Immutable Game");
++    const accountId = await createAccount(game.id);
++
++    for (const body of [
++      { id: "550e8400-e29b-41d4-a716-446655440000" },
++      { gameId: game.id },
++      { accountCode: "ACC-999999" },
++      { displayNumber: "X-999" },
++      { accountNumberPrefix: "X" },
++      { accountNumberSeq: 99 },
++      { status: "INACTIVE" },
++      { statusOverride: "SOLD" },
++      { backupCodes: ["new"] },
++      { createdAt: "2020-01-01T00:00:00Z" },
++      { updatedAt: "2020-01-01T00:00:00Z" },
++      { unknownField: "value" },
++    ]) {
++      const res = await fetch(updateUrl(accountId), {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify(body),
++      });
++      assert.strictEqual(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
++    }
++  });
++
++  it("rejects empty and confirmed-only bodies", async () => {
++    const game = await createGame("Update Empty Body Game");
++    const accountId = await createAccount(game.id);
++
++    const emptyRes = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({}),
++    });
++    assert.strictEqual(emptyRes.status, 400);
++
++    const confirmedRes = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ confirmed: true }),
++    });
++    assert.strictEqual(confirmedRes.status, 400);
++  });
++
++  it("rejects invalid UUID, email, and birthDate", async () => {
++    const res = await fetch(`http://localhost:${testPort}/accounts/not-a-uuid`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: "Updated" }),
++    });
++    assert.strictEqual(res.status, 400);
++
++    const game = await createGame("Update Invalid Fields Game");
++    const accountId = await createAccount(game.id);
++
++    const emailRes = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ psnEmail: "not-an-email" }),
++    });
++    assert.strictEqual(emailRes.status, 400);
++
++    const birthRes = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ birthDate: "1990-99-99" }),
++    });
++    assert.strictEqual(birthRes.status, 400);
++  });
++
++  it("returns 404 for missing or deleted Account", async () => {
++    const res = await fetch(
++      `http://localhost:${testPort}/accounts/550e8400-e29b-41d4-a716-446655440000`,
++      {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ onlineId: "Updated" }),
++      },
++    );
++    assert.strictEqual(res.status, 404);
++
++    const game = await createGame("Update Deleted Account Game");
++    const accountId = await createAccount(game.id);
++    await db.db
++      .update(db.accountsTable)
++      .set({ deletedAt: new Date() })
++      .where(eq(db.accountsTable.id, accountId));
++
++    const deletedRes = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: "Updated" }),
++    });
++    assert.strictEqual(deletedRes.status, 404);
++  });
++
++  it("returns duplicate warning against another Account with zero writes", async () => {
++    const game = await createGame("Update Duplicate Game");
++    const firstRequest = createRequest();
++    const first = await createAccountService({
++      ...firstRequest,
++      gameId: game.id,
++    });
++    assert.strictEqual(first.kind, "created");
++    if (first.kind !== "created") return;
++
++    const secondRequest = createRequest({
++      psnEmail: `different-psn-${nextId()}@example.com`,
++      onlineId: `DifferentOnlineId${nextId()}`,
++      familyManagementEmail: `different-family-${nextId()}@example.com`,
++    });
++    const second = await createAccountService({
++      ...secondRequest,
++      gameId: game.id,
++    });
++    assert.strictEqual(second.kind, "created");
++    if (second.kind !== "created") return;
++
++    const before = await getRowCounts();
++    const res = await fetch(updateUrl(second.account.id), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        psnEmail: firstRequest.psnEmail,
++        onlineId: firstRequest.onlineId,
++      }),
++    });
++    assert.strictEqual(res.status, 409);
++    const data = (await res.json()) as {
++      code: string;
++      detail: { duplicateFields: string[] };
++    };
++    assert.strictEqual(data.code, "DUPLICATE_WARNING");
++    assert.ok(data.detail.duplicateFields.includes("psnEmail"));
++    assert.ok(data.detail.duplicateFields.includes("onlineId"));
++
++    const after = await getRowCounts();
++    assert.strictEqual(after.accounts, before.accounts);
++    assert.strictEqual(after.capacities, before.capacities);
++    assert.strictEqual(after.backupCodes, before.backupCodes);
++  });
++
++  it("does not warn when updating to the same Account's own values", async () => {
++    const game = await createGame("Update Self Match Game");
++    const request = createRequest();
++    const result = await createAccountService({ ...request, gameId: game.id });
++    assert.strictEqual(result.kind, "created");
++    if (result.kind !== "created") return;
++
++    const res = await fetch(updateUrl(result.account.id), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        psnEmail: (request.psnEmail as string).toUpperCase(),
++        onlineId: (request.onlineId as string).toUpperCase(),
++        familyManagementEmail: (request.familyManagementEmail as string).toUpperCase(),
++      }),
++    });
++    assert.strictEqual(res.status, 200);
++  });
++
++  it("confirmed duplicate succeeds and allows the update", async () => {
++    const game = await createGame("Update Confirmed Duplicate Game");
++    const firstRequest = createRequest();
++    const first = await createAccountService({
++      ...firstRequest,
++      gameId: game.id,
++    });
++    assert.strictEqual(first.kind, "created");
++    if (first.kind !== "created") return;
++
++    const secondRequest = createRequest({
++      psnEmail: `confirmed-dup-psn-${nextId()}@example.com`,
++      onlineId: `ConfirmedDupOnlineId${nextId()}`,
++      familyManagementEmail: `confirmed-dup-family-${nextId()}@example.com`,
++    });
++    const second = await createAccountService({
++      ...secondRequest,
++      gameId: game.id,
++    });
++    assert.strictEqual(second.kind, "created");
++    if (second.kind !== "created") return;
++
++    const res = await fetch(updateUrl(second.account.id), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        psnEmail: firstRequest.psnEmail,
++        confirmed: true,
++      }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const row = await loadAccountRow(second.account.id);
++    const keys = loadAccountMasterKey();
++    assert.strictEqual(
++      decrypt(row.psnEmailEncrypted as string, keys.encryptionKey),
++      firstRequest.psnEmail,
++    );
++  });
++
++  it("fails closed and rolls back when encryption key is missing", async () => {
++    const game = await createGame("Update Missing Key Game");
++    const accountId = await createAccount(game.id);
++    const before = await getRowCounts();
++
++    const original = process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
++    delete process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
++    try {
++      const res = await fetch(updateUrl(accountId), {
++        method: "PATCH",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ psnEmail: "new@example.com" }),
++      });
++      assert.strictEqual(res.status, 500);
++      const after = await getRowCounts();
++      assert.strictEqual(after.accounts, before.accounts);
++      assert.strictEqual(after.capacities, before.capacities);
++      assert.strictEqual(after.backupCodes, before.backupCodes);
++    } finally {
++      process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
++    }
++  });
++
++  it("keeps Backup Codes and Capacities unchanged", async () => {
++    const game = await createGame("Update Backup Capacity Game");
++    const accountId = await createAccount(game.id);
++    const beforeCapacities = await getAccountCapacities(accountId);
++    const beforeBackupCodes = await getBackupCodes(accountId);
++
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: `UpdatedCapOnlineId${nextId()}` }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const afterCapacities = await getAccountCapacities(accountId);
++    const afterBackupCodes = await getBackupCodes(accountId);
++    assert.deepStrictEqual(
++      afterCapacities.map((c) => c.id),
++      beforeCapacities.map((c) => c.id),
++    );
++    assert.deepStrictEqual(
++      afterBackupCodes.map((c) => c.id),
++      beforeBackupCodes.map((c) => c.id),
++    );
++  });
++
++  it("keeps identifiers unchanged", async () => {
++    const game = await createGame("Update Identifiers Game");
++    const accountId = await createAccount(game.id);
++    const before = await loadAccountRow(accountId);
++
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ onlineId: `UpdatedIdentifierOnlineId${nextId()}` }),
++    });
++    assert.strictEqual(res.status, 200);
++
++    const after = await loadAccountRow(accountId);
++    assert.strictEqual(after.accountCode, before.accountCode);
++    assert.strictEqual(after.accountNumberPrefix, before.accountNumberPrefix);
++    assert.strictEqual(after.accountNumberSeq, before.accountNumberSeq);
++    assert.strictEqual(after.displayNumber, before.displayNumber);
++    assert.strictEqual(after.gameId, before.gameId);
++  });
++
++  it("response contains no secrets", async () => {
++    const game = await createGame("Update Private Data Game");
++    const accountId = await createAccount(game.id);
++
++    const res = await fetch(updateUrl(accountId), {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        psnEmail: `private-psn-${nextId()}@example.com`,
++        psnPassword: "private-psn-password",
++        emailPassword: "private-email-password",
++        familyManagementEmail: `private-family-${nextId()}@example.com`,
++      }),
++    });
++    assert.strictEqual(res.status, 200);
++    const data = (await res.json()) as { account: Record<string, unknown> };
++    assertNoSecrets(JSON.stringify(data));
++    const body = JSON.stringify(data).toLowerCase();
++    assert.ok(!body.includes("password"), "response leaks password");
++    assert.ok(!body.includes("email"), "response leaks email");
++    assert.ok(!body.includes("encrypted"), "response leaks encrypted value");
++    assert.ok(!body.includes("ciphertext"), "response leaks ciphertext");
++    assert.ok(!body.includes("hash"), "response leaks hash");
++  });
++});
++
++function assertNoSecrets(body: string): void {
++  const lower = body.toLowerCase();
++  const patterns = [
++    "encrypted",
++    "ciphertext",
++    "hash",
++    "password",
++    "backup",
++    "secret",
++    "psn_email",
++    "email_password",
++    "family_management",
++  ];
++  for (const pattern of patterns) {
++    assert.ok(
++      !lower.includes(pattern),
++      `response body leaks a secret/encrypted/hash value (pattern: ${pattern})`,
++    );
++  }
++}
++
++function getFreePort(): Promise<number> {
++  return new Promise((resolve, reject) => {
++    const server = net.createServer();
++    server.listen(0, "127.0.0.1", () => {
++      const address = server.address();
++      const port =
++        typeof address === "object" && address !== null ? address.port : 0;
++      server.close(() => resolve(port));
++    });
++    server.on("error", reject);
++  });
++}
+
+=== new file: lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts ===
+diff --git a/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts
+new file mode 100644
+index 0000000..3d5ffd4
+--- /dev/null
++++ b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts
+@@ -0,0 +1,12 @@
++/**
++ * Generated by orval v8.18.0 🍺
++ * Do not edit manually.
++ * Api
++ * API specification
++ * OpenAPI spec version: 0.1.0
++ */
++import type { SetAccountStatusOverrideRequestStatusOverride } from './setAccountStatusOverrideRequestStatusOverride';
++
++export interface SetAccountStatusOverrideRequest {
++  statusOverride: SetAccountStatusOverrideRequestStatusOverride;
++}
+
+=== new file: lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts ===
+diff --git a/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts
+new file mode 100644
+index 0000000..1ce9a12
+--- /dev/null
++++ b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts
+@@ -0,0 +1,15 @@
++/**
++ * Generated by orval v8.18.0 🍺
++ * Do not edit manually.
++ * Api
++ * API specification
++ * OpenAPI spec version: 0.1.0
++ */
++
++export type SetAccountStatusOverrideRequestStatusOverride = typeof SetAccountStatusOverrideRequestStatusOverride[keyof typeof SetAccountStatusOverrideRequestStatusOverride] | null;
++
++
++export const SetAccountStatusOverrideRequestStatusOverride = {
++  SOLD: 'SOLD',
++  INACTIVE: 'INACTIVE',
++} as const;
+
+=== new file: lib/api-zod/src/generated/types/updateAccountRequest.ts ===
+diff --git a/lib/api-zod/src/generated/types/updateAccountRequest.ts b/lib/api-zod/src/generated/types/updateAccountRequest.ts
+new file mode 100644
+index 0000000..945e9f4
+--- /dev/null
++++ b/lib/api-zod/src/generated/types/updateAccountRequest.ts
+@@ -0,0 +1,21 @@
++/**
++ * Generated by orval v8.18.0 🍺
++ * Do not edit manually.
++ * Api
++ * API specification
++ * OpenAPI spec version: 0.1.0
++ */
++
++export interface UpdateAccountRequest {
++  psnEmail?: string;
++  /** @minLength 1 */
++  psnPassword?: string;
++  /** @minLength 1 */
++  emailPassword?: string;
++  /** @minLength 1 */
++  onlineId?: string;
++  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
++  birthDate?: string;
++  familyManagementEmail?: string;
++  confirmed?: boolean;
++}
+
+=== new file: playsyncer-ps03d5-4-update-status-backend-review.zip ===
+diff --git a/playsyncer-ps03d5-4-update-status-backend-review.zip b/playsyncer-ps03d5-4-update-status-backend-review.zip
+new file mode 100644
+index 0000000..be75a8f
+Binary files /dev/null and b/playsyncer-ps03d5-4-update-status-backend-review.zip differ
+
+=== new file: reports/diff.patch ===
+diff --git a/reports/diff.patch b/reports/diff.patch
+new file mode 100644
+index 0000000..0e11e06
+--- /dev/null
++++ b/reports/diff.patch
+@@ -0,0 +1,2360 @@
++diff --git a/artifacts/api-server/src/lib/account-contract.test.ts b/artifacts/api-server/src/lib/account-contract.test.ts
++index 45d312b..307aaa1 100644
++--- a/artifacts/api-server/src/lib/account-contract.test.ts
+++++ b/artifacts/api-server/src/lib/account-contract.test.ts
++@@ -104,6 +104,8 @@ describe("Account OpenAPI contract", () => {
++       "AccountDetailResponse",
++       "AccountCapacitiesResponse",
++       "CreateAccountRequest",
+++      "UpdateAccountRequest",
+++      "SetAccountStatusOverrideRequest",
++       "DuplicateWarningResponse",
++       "DuplicateFieldName",
++       "StandardApiError",
++@@ -168,12 +170,22 @@ describe("Account OpenAPI contract", () => {
++         `expected generated Create Account hook token ${token}`,
++       );
++     }
++-    const forbidden = [
+++    const requiredUpdate = [
++       "export const updateAccount",
+++      "export const setAccountStatusOverride",
+++      "export const useUpdateAccount",
+++      "export const useSetAccountStatusOverride",
+++    ];
+++    for (const token of requiredUpdate) {
+++      assert.ok(
+++        hooks.includes(token),
+++        `expected generated Update/Status hook token ${token}`,
+++      );
+++    }
+++    const forbidden = [
++       "export const deleteAccount",
++       "export const getAccountSecrets",
++       "export const getAccountBackupCodes",
++-      "export function useUpdateAccount",
++       "export function useDeleteAccount",
++       "export function useGetAccountSecrets",
++       "export function useGetAccountBackupCodes",
++@@ -204,6 +216,14 @@ describe("Account OpenAPI contract", () => {
++       openApi.includes("operationId: createAccount"),
++       "createAccount operation must be in OpenAPI",
++     );
+++    assert.ok(
+++      openApi.includes("operationId: updateAccount"),
+++      "updateAccount operation must be in OpenAPI",
+++    );
+++    assert.ok(
+++      openApi.includes("operationId: setAccountStatusOverride"),
+++      "setAccountStatusOverride operation must be in OpenAPI",
+++    );
++     assert.ok(
++       !openApi.includes("/secrets"),
++       "Secret Reveal path must not be in OpenAPI",
++@@ -212,13 +232,22 @@ describe("Account OpenAPI contract", () => {
++       !openApi.includes("/backup-codes"),
++       "Backup Code Reveal path must not be in OpenAPI",
++     );
++-    assert.ok(
++-      !openApi.includes("operationId: updateAccount"),
++-      "updateAccount operation must not be in OpenAPI",
++-    );
++     assert.ok(
++       !openApi.includes("operationId: deleteAccount"),
++       "deleteAccount operation must not be in OpenAPI",
++     );
++   });
+++
+++  it("does not allow the active frontend to import Account mutation hooks", () => {
+++    const frontendSrc = path.resolve(root, "artifacts", "playsyncer", "src");
+++    const output = execSync(
+++      `grep -R "useUpdateAccount\\|useSetAccountStatusOverride\\|updateAccount\\|setAccountStatusOverride" ${frontendSrc} || true`,
+++      { encoding: "utf-8" },
+++    );
+++    assert.strictEqual(
+++      output.trim(),
+++      "",
+++      "active frontend imports or references Account mutation hooks/functions",
+++    );
+++  });
++ });
++diff --git a/artifacts/api-server/src/routes/accounts.disabled.test.ts b/artifacts/api-server/src/routes/accounts.disabled.test.ts
++index 7ed25ee..9078de5 100644
++--- a/artifacts/api-server/src/routes/accounts.disabled.test.ts
+++++ b/artifacts/api-server/src/routes/accounts.disabled.test.ts
++@@ -109,8 +109,23 @@ describe("Account mutation routes are disabled", () => {
++       body: JSON.stringify({ status: "disabled" }),
++     });
++     assert.strictEqual(res.status, 403);
++-    const data = (await res.json()) as ErrorResponse;
+++    const data = (await res.json()) as { error: string; code: string };
++     assert.strictEqual(data.error, "Account operations are not authorized");
+++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+++    assert.strictEqual(countRows(databaseUrl, "accounts"), before);
+++  });
+++
+++  it("PATCH /accounts/:id/status-override returns 403 and writes nothing", async () => {
+++    const before = countRows(databaseUrl, "accounts");
+++    const res = await fetch(`${baseUrl}/accounts/${gameId}/status-override`, {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(res.status, 403);
+++    const data = (await res.json()) as { error: string; code: string };
+++    assert.strictEqual(data.error, "Account operations are not authorized");
+++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
++     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
++   });
++ 
++@@ -120,8 +135,9 @@ describe("Account mutation routes are disabled", () => {
++       method: "DELETE",
++     });
++     assert.strictEqual(res.status, 403);
++-    const data = (await res.json()) as ErrorResponse;
+++    const data = (await res.json()) as { error: string; code: string };
++     assert.strictEqual(data.error, "Account operations are not authorized");
+++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
++     assert.strictEqual(countRows(databaseUrl, "accounts"), before);
++   });
++ 
++diff --git a/artifacts/api-server/src/routes/accounts.ts b/artifacts/api-server/src/routes/accounts.ts
++index 8cdbda0..e6cd8eb 100644
++--- a/artifacts/api-server/src/routes/accounts.ts
+++++ b/artifacts/api-server/src/routes/accounts.ts
++@@ -31,10 +31,13 @@ import {
++ } from "../lib/account-status.ts";
++ import {
++   createAccount as createAccountService,
+++  updateAccount as updateAccountService,
+++  setAccountStatusOverride as setAccountStatusOverrideService,
++   GameNotFoundError,
++   InactiveGameError,
++   IdentifierConflictError,
++   EncryptionError,
+++  AccountNotFoundError,
++ } from "../services/account/index.ts";
++ 
++ const router: IRouter = Router();
++@@ -134,16 +137,17 @@ function toStatusInput(capacities: AccountCapacity[]): StatusCapacity[] {
++   return capacities.map((c) => ({ id: c.id, isFinished: c.isFinished }));
++ }
++ 
++-/** Build an AccountDetailResponse from a newly created safe Account. */
++-async function buildCreatedAccountResponse(
+++/** Build an AccountDetailResponse from a safe Account and its override. */
+++async function buildAccountDetailResponse(
++   account: SafeAccount,
+++  statusOverride: "SOLD" | "INACTIVE" | null,
++ ): Promise<SafeAccountDetail> {
++   const capacities = await loadCapacities([account.id]);
++   const capacityIds = capacities.map((c) => c.id);
++   const activeCustomerCapacityIds =
++     await loadActiveCustomerCapacityIds(capacityIds);
++   const status = deriveAccountStatus(
++-    null,
+++    statusOverride,
++     toStatusInput(capacities),
++     activeCustomerCapacityIds,
++   );
++@@ -194,7 +198,7 @@ export async function createAccountHandler(
++       return;
++     }
++ 
++-    const accountDetail = await buildCreatedAccountResponse(result.account);
+++    const accountDetail = await buildAccountDetailResponse(result.account, null);
++     res.status(201).json({ account: accountDetail });
++   } catch (err) {
++     if (err instanceof GameNotFoundError) {
++@@ -224,6 +228,87 @@ export async function createAccountHandler(
++   }
++ }
++ 
+++/**
+++ * Update Account HTTP handler.
+++ *
+++ * Exported but intentionally NOT mounted in the production router. The public
+++ * PATCH /accounts/:accountId route remains disabled. Tests mount this handler
+++ * in an isolated Express app to verify the contract and behavior.
+++ */
+++export async function updateAccountHandler(
+++  req: Request,
+++  res: Response,
+++  next: NextFunction,
+++): Promise<void> {
+++  try {
+++    const accountId = p(req.params["id"]);
+++    const result = await updateAccountService({
+++      ...(req.body as Record<string, unknown>),
+++      accountId,
+++    });
+++
+++    if (result.kind === "duplicate-warning") {
+++      res.status(409).json({
+++        error: PERSIAN.DUPLICATE_WARNING,
+++        code: "DUPLICATE_WARNING",
+++        detail: { duplicateFields: result.duplicateFields },
+++      });
+++      return;
+++    }
+++
+++    const accountDetail = await buildAccountDetailResponse(
+++      result.account,
+++      result.statusOverride,
+++    );
+++    res.status(200).json({ account: accountDetail });
+++  } catch (err) {
+++    if (err instanceof AccountNotFoundError) {
+++      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
+++      return;
+++    }
+++    if (err instanceof EncryptionError) {
+++      logger.error(err, "Encryption configuration error during account update");
+++      next(new HttpError(500, PERSIAN.INTERNAL_ERROR, "INTERNAL_ERROR"));
+++      return;
+++    }
+++    next(err);
+++  }
+++}
+++
+++/**
+++ * Set Account Status Override HTTP handler.
+++ *
+++ * Exported but intentionally NOT mounted in the production router. The public
+++ * PATCH /accounts/:accountId/status-override route remains disabled. Tests
+++ * mount this handler in an isolated Express app to verify the contract and
+++ * behavior.
+++ */
+++export async function setAccountStatusOverrideHandler(
+++  req: Request,
+++  res: Response,
+++  next: NextFunction,
+++): Promise<void> {
+++  try {
+++    const accountId = p(req.params["id"]);
+++    const result = await setAccountStatusOverrideService({
+++      ...(req.body as Record<string, unknown>),
+++      accountId,
+++    });
+++
+++    const accountDetail = await buildAccountDetailResponse(
+++      result.account,
+++      result.statusOverride,
+++    );
+++    res.status(200).json({ account: accountDetail });
+++  } catch (err) {
+++    if (err instanceof AccountNotFoundError) {
+++      next(new HttpError(404, PERSIAN.ACCOUNT_NOT_FOUND, "ACCOUNT_NOT_FOUND"));
+++      return;
+++    }
+++    next(err);
+++  }
+++}
+++
++ // ── Routes ──────────────────────────────────────────────────────────────────
++ 
++ /** GET /games/:gameId/accounts — list non-secret Account summaries for a Game. */
++@@ -336,12 +421,17 @@ router.post("/games/:gameId/accounts", async (_req: Request, res: Response) => {
++ 
++ /** PATCH /accounts/:id — disabled; account editing is not authorized. */
++ router.patch("/accounts/:id", async (_req: Request, res: Response) => {
++-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
+++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
+++});
+++
+++/** PATCH /accounts/:id/status-override — disabled; account status override is not authorized. */
+++router.patch("/accounts/:id/status-override", async (_req: Request, res: Response) => {
+++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
++ });
++ 
++ /** DELETE /accounts/:id — disabled; account deletion is not authorized. */
++ router.delete("/accounts/:id", async (_req: Request, res: Response) => {
++-  res.status(403).json({ error: ACCOUNT_OPS_DISABLED });
+++  res.status(403).json({ error: ACCOUNT_OPS_DISABLED, code: "ACCOUNT_OPS_DISABLED" });
++ });
++ 
++ export default router;
++diff --git a/artifacts/api-server/src/services/account/index.ts b/artifacts/api-server/src/services/account/index.ts
++index e622fd8..a7f038b 100644
++--- a/artifacts/api-server/src/services/account/index.ts
+++++ b/artifacts/api-server/src/services/account/index.ts
++@@ -7,8 +7,9 @@ import {
++   gamesTable,
++   type Account,
++   type Game,
+++  type InsertAccount,
++ } from "@workspace/db";
++-import { eq, and, isNull, sql } from "drizzle-orm";
+++import { eq, and, isNull, sql, ne } from "drizzle-orm";
++ import { z } from "zod";
++ import {
++   buildCapacityDefinitions,
++@@ -51,6 +52,12 @@ export class EncryptionError extends AccountDomainError {
++   }
++ }
++ 
+++export class AccountNotFoundError extends AccountDomainError {
+++  constructor() {
+++    super("Account not found");
+++  }
+++}
+++
++ export type CreateAccountResult =
++   | { kind: "created"; account: SafeAccount }
++   | { kind: "duplicate-warning"; duplicateFields: string[] };
++@@ -516,3 +523,328 @@ export async function createAccount(
++     }
++   });
++ }
+++
+++export type UpdateAccountResult =
+++  | {
+++      kind: "updated";
+++      account: SafeAccount;
+++      statusOverride: "SOLD" | "INACTIVE" | null;
+++    }
+++  | { kind: "duplicate-warning"; duplicateFields: string[] };
+++
+++export const UpdateAccountInput = z
+++  .object({
+++    accountId: z.string().uuid(),
+++    psnEmail: emailSchema.optional(),
+++    psnPassword: z.string().min(1, "PSN Password is required").optional(),
+++    emailPassword: z.string().min(1, "Email Password is required").optional(),
+++    onlineId: onlineIdSchema.optional(),
+++    birthDate: birthDateSchema.optional(),
+++    familyManagementEmail: emailSchema.optional(),
+++    confirmed: z.boolean().optional().default(false),
+++  })
+++  .strict()
+++  .refine(
+++    (v) =>
+++      [
+++        "psnEmail",
+++        "psnPassword",
+++        "emailPassword",
+++        "onlineId",
+++        "birthDate",
+++        "familyManagementEmail",
+++      ].some((field) => v[field as keyof typeof v] !== undefined),
+++    {
+++      message: "At least one editable field is required; confirmed alone is not valid",
+++    },
+++  );
+++
+++export type UpdateAccountInput = z.infer<typeof UpdateAccountInput>;
+++
+++type ChangedLookupFields = {
+++  psnEmail?: string;
+++  familyManagementEmail?: string;
+++  onlineId?: string;
+++};
+++
+++async function acquireDuplicateLocksForUpdate(
+++  client: DbClient,
+++  changed: ChangedLookupFields,
+++  keys: AccountKeys,
+++): Promise<void> {
+++  const tokens: bigint[] = [];
+++  if (changed.psnEmail !== undefined) {
+++    tokens.push(
+++      deriveAdvisoryLockId(
+++        hashForLookup(normalizeEmail(changed.psnEmail), keys.lookupHashKey),
+++      ),
+++    );
+++  }
+++  if (changed.familyManagementEmail !== undefined) {
+++    tokens.push(
+++      deriveAdvisoryLockId(
+++        hashForLookup(
+++          normalizeEmail(changed.familyManagementEmail),
+++          keys.lookupHashKey,
+++        ),
+++      ),
+++    );
+++  }
+++  if (changed.onlineId !== undefined) {
+++    tokens.push(
+++      deriveAdvisoryLockId(
+++        hashForLookup(normalizeOnlineId(changed.onlineId), keys.lookupHashKey),
+++      ),
+++    );
+++  }
+++
+++  const uniqueLockIds = [...new Set(tokens)].sort((a, b) =>
+++    a < b ? -1 : a > b ? 1 : 0,
+++  );
+++  for (const lockId of uniqueLockIds) {
+++    await client.execute(sql`SELECT pg_advisory_xact_lock(${lockId})`);
+++  }
+++}
+++
+++async function findDuplicateFieldsForUpdate(
+++  client: DbClient,
+++  accountId: string,
+++  changed: ChangedLookupFields,
+++  keys: AccountKeys,
+++): Promise<string[]> {
+++  const duplicates: string[] = [];
+++
+++  if (changed.psnEmail !== undefined) {
+++    const hash = hashForLookup(
+++      normalizeEmail(changed.psnEmail),
+++      keys.lookupHashKey,
+++    );
+++    const [match] = await client
+++      .select({ id: accountsTable.id })
+++      .from(accountsTable)
+++      .where(
+++        and(
+++          eq(accountsTable.psnEmailLookupHash, hash),
+++          isNull(accountsTable.deletedAt),
+++          ne(accountsTable.id, accountId),
+++        ),
+++      )
+++      .limit(1);
+++    if (match) duplicates.push("psnEmail");
+++  }
+++
+++  if (changed.familyManagementEmail !== undefined) {
+++    const hash = hashForLookup(
+++      normalizeEmail(changed.familyManagementEmail),
+++      keys.lookupHashKey,
+++    );
+++    const [match] = await client
+++      .select({ id: accountsTable.id })
+++      .from(accountsTable)
+++      .where(
+++        and(
+++          eq(accountsTable.familyManagementEmailLookupHash, hash),
+++          isNull(accountsTable.deletedAt),
+++          ne(accountsTable.id, accountId),
+++        ),
+++      )
+++      .limit(1);
+++    if (match) duplicates.push("familyManagementEmail");
+++  }
+++
+++  if (changed.onlineId !== undefined) {
+++    const normalized = normalizeOnlineId(changed.onlineId);
+++    const [match] = await client
+++      .select({ id: accountsTable.id })
+++      .from(accountsTable)
+++      .where(
+++        and(
+++          sql`LOWER(${accountsTable.onlineId}) = LOWER(${normalized})`,
+++          isNull(accountsTable.deletedAt),
+++          ne(accountsTable.id, accountId),
+++        ),
+++      )
+++      .limit(1);
+++    if (match) duplicates.push("onlineId");
+++  }
+++
+++  return duplicates;
+++}
+++
+++export async function updateAccount(
+++  input: unknown,
+++): Promise<UpdateAccountResult> {
+++  const parsed = UpdateAccountInput.parse(input);
+++  const keys = loadAccountMasterKey();
+++
+++  return db.transaction(async (tx) => {
+++    const client = tx as unknown as DbClient;
+++    const [account] = await client
+++      .select()
+++      .from(accountsTable)
+++      .where(
+++        and(
+++          eq(accountsTable.id, parsed.accountId),
+++          isNull(accountsTable.deletedAt),
+++        ),
+++      )
+++      .limit(1)
+++      .for("update");
+++
+++    if (!account) {
+++      throw new AccountNotFoundError();
+++    }
+++
+++    const updates: Partial<InsertAccount> = {};
+++    const changedLookupFields: ChangedLookupFields = {};
+++
+++    if (parsed.psnEmail !== undefined) {
+++      const normalized = normalizeEmail(parsed.psnEmail);
+++      const newHash = hashForLookup(normalized, keys.lookupHashKey);
+++      if (newHash !== account.psnEmailLookupHash) {
+++        updates.psnEmailEncrypted = encrypt(normalized, keys.encryptionKey);
+++        updates.psnEmailLookupHash = newHash;
+++        changedLookupFields.psnEmail = normalized;
+++      }
+++    }
+++
+++    if (parsed.familyManagementEmail !== undefined) {
+++      const normalized = normalizeEmail(parsed.familyManagementEmail);
+++      const newHash = hashForLookup(normalized, keys.lookupHashKey);
+++      if (newHash !== account.familyManagementEmailLookupHash) {
+++        updates.familyManagementEmailEncryptedV2 = encrypt(
+++          normalized,
+++          keys.encryptionKey,
+++        );
+++        updates.familyManagementEmailLookupHash = newHash;
+++        changedLookupFields.familyManagementEmail = normalized;
+++      }
+++    }
+++
+++    if (parsed.onlineId !== undefined) {
+++      const normalized = normalizeOnlineId(parsed.onlineId);
+++      if (
+++        normalized.toLowerCase() !== (account.onlineId ?? "").toLowerCase()
+++      ) {
+++        updates.onlineId = normalized;
+++        changedLookupFields.onlineId = normalized;
+++      }
+++    }
+++
+++    if (parsed.psnPassword !== undefined) {
+++      const newHash = hashForLookup(parsed.psnPassword, keys.lookupHashKey);
+++      if (newHash !== account.psnPasswordLookupHash) {
+++        updates.psnPasswordEncrypted = encrypt(
+++          parsed.psnPassword,
+++          keys.encryptionKey,
+++        );
+++        updates.psnPasswordLookupHash = newHash;
+++      }
+++    }
+++
+++    if (parsed.emailPassword !== undefined) {
+++      const newHash = hashForLookup(parsed.emailPassword, keys.lookupHashKey);
+++      if (newHash !== account.emailPasswordLookupHash) {
+++        updates.emailPasswordEncryptedV2 = encrypt(
+++          parsed.emailPassword,
+++          keys.encryptionKey,
+++        );
+++        updates.emailPasswordLookupHash = newHash;
+++      }
+++    }
+++
+++    if (
+++      parsed.birthDate !== undefined &&
+++      parsed.birthDate !== account.birthDate
+++    ) {
+++      updates.birthDate = parsed.birthDate;
+++    }
+++
+++    const hasChangedLookup =
+++      changedLookupFields.psnEmail !== undefined ||
+++      changedLookupFields.familyManagementEmail !== undefined ||
+++      changedLookupFields.onlineId !== undefined;
+++
+++    if (hasChangedLookup && !parsed.confirmed) {
+++      await acquireDuplicateLocksForUpdate(client, changedLookupFields, keys);
+++      const duplicates = await findDuplicateFieldsForUpdate(
+++        client,
+++        parsed.accountId,
+++        changedLookupFields,
+++        keys,
+++      );
+++      if (duplicates.length > 0) {
+++        return { kind: "duplicate-warning", duplicateFields: duplicates };
+++      }
+++    }
+++
+++    if (Object.keys(updates).length > 0) {
+++      updates.updatedAt = new Date();
+++      await client
+++        .update(accountsTable)
+++        .set(updates)
+++        .where(eq(accountsTable.id, parsed.accountId));
+++    }
+++
+++    // Re-fetch to get the updated row and any DB-computed defaults.
+++    const [updated] = await client
+++      .select()
+++      .from(accountsTable)
+++      .where(eq(accountsTable.id, parsed.accountId))
+++      .limit(1);
+++
+++    return {
+++      kind: "updated",
+++      account: toSafeAccount(updated),
+++      statusOverride: updated.statusOverride,
+++    };
+++  });
+++}
+++
+++export const SetAccountStatusOverrideInput = z
+++  .object({
+++    accountId: z.string().uuid(),
+++    statusOverride: z.enum(["SOLD", "INACTIVE"]).nullable(),
+++  })
+++  .strict();
+++
+++export type SetAccountStatusOverrideInput = z.infer<
+++  typeof SetAccountStatusOverrideInput
+++>;
+++
+++export async function setAccountStatusOverride(
+++  input: unknown,
+++): Promise<{ kind: "updated"; account: SafeAccount; statusOverride: "SOLD" | "INACTIVE" | null }> {
+++  const parsed = SetAccountStatusOverrideInput.parse(input);
+++
+++  return db.transaction(async (tx) => {
+++    const client = tx as unknown as DbClient;
+++    const [account] = await client
+++      .select()
+++      .from(accountsTable)
+++      .where(
+++        and(
+++          eq(accountsTable.id, parsed.accountId),
+++          isNull(accountsTable.deletedAt),
+++        ),
+++      )
+++      .limit(1)
+++      .for("update");
+++
+++    if (!account) {
+++      throw new AccountNotFoundError();
+++    }
+++
+++    const [updated] = await client
+++      .update(accountsTable)
+++      .set({ statusOverride: parsed.statusOverride, updatedAt: new Date() })
+++      .where(eq(accountsTable.id, parsed.accountId))
+++      .returning();
+++
+++    return {
+++      kind: "updated",
+++      account: toSafeAccount(updated),
+++      statusOverride: updated.statusOverride,
+++    };
+++  });
+++}
++diff --git a/docs/CURRENT_PHASE.md b/docs/CURRENT_PHASE.md
++index b5cd92c..6efe229 100644
++--- a/docs/CURRENT_PHASE.md
+++++ b/docs/CURRENT_PHASE.md
++@@ -1,13 +1,13 @@
++-Previous completed sub-stage:
++-PS-03D5-3 — Create Account Backend, Runtime Disabled
++-
++-Previous sub-stage status:
++-APPROVED_AND_CLOSED
+++Current stage:
+++PS-03D5 — Account Mutation Implementation, Runtime Disabled
++ 
++ Current sub-stage:
++ PS-03D5-4 — Update and Status Override Backend, Runtime Disabled
++ 
++ Current status:
++-PS-03D5-4 — AWAITING COMMAND CENTER AUTHORIZATION TO START
+++PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+++
+++Next planned sub-stage:
+++PS-03D5-5 — Delete Account Safety Boundary
++ 
++ Keep runtime activation deferred to PS-03D7.
++diff --git a/lib/api-client-react/src/generated/api.schemas.ts b/lib/api-client-react/src/generated/api.schemas.ts
++index 0a6b9a5..0530c95 100644
++--- a/lib/api-client-react/src/generated/api.schemas.ts
+++++ b/lib/api-client-react/src/generated/api.schemas.ts
++@@ -175,6 +175,32 @@ export interface CreateAccountRequest {
++   confirmed?: boolean;
++ }
++ 
+++export interface UpdateAccountRequest {
+++  psnEmail?: string;
+++  /** @minLength 1 */
+++  psnPassword?: string;
+++  /** @minLength 1 */
+++  emailPassword?: string;
+++  /** @minLength 1 */
+++  onlineId?: string;
+++  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+++  birthDate?: string;
+++  familyManagementEmail?: string;
+++  confirmed?: boolean;
+++}
+++
+++export type SetAccountStatusOverrideRequestStatusOverride = typeof SetAccountStatusOverrideRequestStatusOverride[keyof typeof SetAccountStatusOverrideRequestStatusOverride] | null;
+++
+++
+++export const SetAccountStatusOverrideRequestStatusOverride = {
+++  SOLD: 'SOLD',
+++  INACTIVE: 'INACTIVE',
+++} as const;
+++
+++export interface SetAccountStatusOverrideRequest {
+++  statusOverride: SetAccountStatusOverrideRequestStatusOverride;
+++}
+++
++ export type DuplicateWarningResponseCode = typeof DuplicateWarningResponseCode[keyof typeof DuplicateWarningResponseCode];
++ 
++ 
++diff --git a/lib/api-client-react/src/generated/api.ts b/lib/api-client-react/src/generated/api.ts
++index c509e23..f9a8262 100644
++--- a/lib/api-client-react/src/generated/api.ts
+++++ b/lib/api-client-react/src/generated/api.ts
++@@ -32,7 +32,9 @@ import type {
++   HealthStatus,
++   OkResponse,
++   ReadinessStatus,
+++  SetAccountStatusOverrideRequest,
++   StandardApiError,
+++  UpdateAccountRequest,
++   UpdateGameRequest
++ } from './api.schemas';
++ 
++@@ -818,6 +820,78 @@ export function useGetAccount<TData = Awaited<ReturnType<typeof getAccount>>, TE
++ 
++ 
++ 
+++export const getUpdateAccountUrl = (accountId: string,) => {
+++
+++
+++
+++
+++  return `/api/accounts/${accountId}`
+++}
+++
+++/**
+++ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
+++ * @summary Update an account
+++ */
+++export const updateAccount = async (accountId: string,
+++    updateAccountRequest: UpdateAccountRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
+++
+++  return customFetch<AccountDetailResponse>(getUpdateAccountUrl(accountId),
+++  {
+++    ...options,
+++    method: 'PATCH',
+++    headers: { 'Content-Type': 'application/json', ...options?.headers },
+++    body: JSON.stringify(updateAccountRequest)
+++  }
+++);}
+++
+++
+++
+++
+++export const getUpdateAccountMutationOptions = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+++): UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext> => {
+++
+++const mutationKey = ['updateAccount'];
+++const {mutation: mutationOptions, request: requestOptions} = options ?
+++      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+++      options
+++      : {...options, mutation: {...options.mutation, mutationKey}}
+++      : {mutation: { mutationKey, }, request: undefined};
+++
+++
+++
+++
+++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateAccount>>, {accountId: string;data: BodyType<UpdateAccountRequest>}> = (props) => {
+++          const {accountId,data} = props ?? {};
+++
+++          return  updateAccount(accountId,data,requestOptions)
+++        }
+++
+++
+++
+++
+++
+++
+++  return  { mutationFn, ...mutationOptions }}
+++
+++    export type UpdateAccountMutationResult = NonNullable<Awaited<ReturnType<typeof updateAccount>>>
+++    export type UpdateAccountMutationBody = BodyType<UpdateAccountRequest>
+++    export type UpdateAccountMutationError = ErrorType<StandardApiError | DuplicateWarningResponse>
+++
+++    /**
+++ * @summary Update an account
+++ */
+++export const useUpdateAccount = <TError = ErrorType<StandardApiError | DuplicateWarningResponse>,
+++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateAccount>>, TError,{accountId: string;data: BodyType<UpdateAccountRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+++ ): UseMutationResult<
+++        Awaited<ReturnType<typeof updateAccount>>,
+++        TError,
+++        {accountId: string;data: BodyType<UpdateAccountRequest>},
+++        TContext
+++      > => {
+++      return useMutation(getUpdateAccountMutationOptions(options));
+++    }
+++
++ export const getGetAccountCapacitiesUrl = (accountId: string,) => {
++ 
++ 
++@@ -896,3 +970,75 @@ export function useGetAccountCapacities<TData = Awaited<ReturnType<typeof getAcc
++ 
++ 
++ 
+++export const getSetAccountStatusOverrideUrl = (accountId: string,) => {
+++
+++
+++
+++
+++  return `/api/accounts/${accountId}/status-override`
+++}
+++
+++/**
+++ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
+++ * @summary Set account status override
+++ */
+++export const setAccountStatusOverride = async (accountId: string,
+++    setAccountStatusOverrideRequest: SetAccountStatusOverrideRequest, options?: RequestInit): Promise<AccountDetailResponse> => {
+++
+++  return customFetch<AccountDetailResponse>(getSetAccountStatusOverrideUrl(accountId),
+++  {
+++    ...options,
+++    method: 'PATCH',
+++    headers: { 'Content-Type': 'application/json', ...options?.headers },
+++    body: JSON.stringify(setAccountStatusOverrideRequest)
+++  }
+++);}
+++
+++
+++
+++
+++export const getSetAccountStatusOverrideMutationOptions = <TError = ErrorType<StandardApiError>,
+++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+++): UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext> => {
+++
+++const mutationKey = ['setAccountStatusOverride'];
+++const {mutation: mutationOptions, request: requestOptions} = options ?
+++      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+++      options
+++      : {...options, mutation: {...options.mutation, mutationKey}}
+++      : {mutation: { mutationKey, }, request: undefined};
+++
+++
+++
+++
+++      const mutationFn: MutationFunction<Awaited<ReturnType<typeof setAccountStatusOverride>>, {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}> = (props) => {
+++          const {accountId,data} = props ?? {};
+++
+++          return  setAccountStatusOverride(accountId,data,requestOptions)
+++        }
+++
+++
+++
+++
+++
+++
+++  return  { mutationFn, ...mutationOptions }}
+++
+++    export type SetAccountStatusOverrideMutationResult = NonNullable<Awaited<ReturnType<typeof setAccountStatusOverride>>>
+++    export type SetAccountStatusOverrideMutationBody = BodyType<SetAccountStatusOverrideRequest>
+++    export type SetAccountStatusOverrideMutationError = ErrorType<StandardApiError>
+++
+++    /**
+++ * @summary Set account status override
+++ */
+++export const useSetAccountStatusOverride = <TError = ErrorType<StandardApiError>,
+++    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof setAccountStatusOverride>>, TError,{accountId: string;data: BodyType<SetAccountStatusOverrideRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+++ ): UseMutationResult<
+++        Awaited<ReturnType<typeof setAccountStatusOverride>>,
+++        TError,
+++        {accountId: string;data: BodyType<SetAccountStatusOverrideRequest>},
+++        TContext
+++      > => {
+++      return useMutation(getSetAccountStatusOverrideMutationOptions(options));
+++    }
+++
++diff --git a/lib/api-spec/openapi.yaml b/lib/api-spec/openapi.yaml
++index 91d7dc0..c7d9e20 100644
++--- a/lib/api-spec/openapi.yaml
+++++ b/lib/api-spec/openapi.yaml
++@@ -379,6 +379,65 @@ paths:
++             application/json:
++               schema:
++                 $ref: '#/components/schemas/StandardApiError'
+++    patch:
+++      operationId: updateAccount
+++      tags:
+++        - accounts
+++      summary: Update an account
+++      description: >-
+++        Updates editable Account fields. Immutable fields, Backup Codes, and
+++        Capacities cannot be changed. Duplicate values against other Accounts may
+++        be accepted by sending `confirmed: true`.
+++      parameters:
+++        - name: accountId
+++          in: path
+++          required: true
+++          schema:
+++            type: string
+++            format: uuid
+++      requestBody:
+++        required: true
+++        content:
+++          application/json:
+++            schema:
+++              $ref: '#/components/schemas/UpdateAccountRequest'
+++      responses:
+++        '200':
+++          description: Account updated
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/AccountDetailResponse'
+++        '400':
+++          description: Validation failure
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '403':
+++          description: Account operations disabled in the mounted runtime
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '404':
+++          description: Account not found
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '409':
+++          description: Duplicate warning
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/DuplicateWarningResponse'
+++        '500':
+++          description: Unexpected or encryption configuration failure
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
++   /accounts/{accountId}/capacities:
++     get:
++       operationId: getAccountCapacities
++@@ -418,6 +477,60 @@ paths:
++             application/json:
++               schema:
++                 $ref: '#/components/schemas/StandardApiError'
+++  /accounts/{accountId}/status-override:
+++    patch:
+++      operationId: setAccountStatusOverride
+++      tags:
+++        - accounts
+++      summary: Set account status override
+++      description: >-
+++        Sets, changes, or clears the Account status override. Accepted values are
+++        SOLD, INACTIVE, or null. The response includes the recalculated canonical
+++        Account status. Capacities and Customer Assignments are not modified.
+++      parameters:
+++        - name: accountId
+++          in: path
+++          required: true
+++          schema:
+++            type: string
+++            format: uuid
+++      requestBody:
+++        required: true
+++        content:
+++          application/json:
+++            schema:
+++              $ref: '#/components/schemas/SetAccountStatusOverrideRequest'
+++      responses:
+++        '200':
+++          description: Account status override updated
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/AccountDetailResponse'
+++        '400':
+++          description: Validation failure
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '403':
+++          description: Account operations disabled in the mounted runtime
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '404':
+++          description: Account not found
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
+++        '500':
+++          description: Unexpected error
+++          content:
+++            application/json:
+++              schema:
+++                $ref: '#/components/schemas/StandardApiError'
++ components:
++   schemas:
++     HealthStatus:
++@@ -729,6 +842,43 @@ components:
++         - birthDate
++         - familyManagementEmail
++         - backupCodes
+++    UpdateAccountRequest:
+++      type: object
+++      properties:
+++        psnEmail:
+++          type: string
+++          format: email
+++        psnPassword:
+++          type: string
+++          minLength: 1
+++        emailPassword:
+++          type: string
+++          minLength: 1
+++        onlineId:
+++          type: string
+++          minLength: 1
+++        birthDate:
+++          type: string
+++          pattern: ^\d{4}-\d{2}-\d{2}$
+++        familyManagementEmail:
+++          type: string
+++          format: email
+++        confirmed:
+++          type: boolean
+++          default: false
+++      additionalProperties: false
+++    SetAccountStatusOverrideRequest:
+++      type: object
+++      properties:
+++        statusOverride:
+++          type: string
+++          nullable: true
+++          enum:
+++            - SOLD
+++            - INACTIVE
+++      required:
+++        - statusOverride
+++      additionalProperties: false
++     DuplicateWarningResponse:
++       type: object
++       properties:
++diff --git a/lib/api-zod/src/generated/api.ts b/lib/api-zod/src/generated/api.ts
++index 91b7955..c2d11f7 100644
++--- a/lib/api-zod/src/generated/api.ts
+++++ b/lib/api-zod/src/generated/api.ts
++@@ -269,6 +269,57 @@ export const GetAccountResponse = zod.object({
++ })
++ 
++ 
+++/**
+++ * Updates editable Account fields. Immutable fields, Backup Codes, and Capacities cannot be changed. Duplicate values against other Accounts may be accepted by sending `confirmed: true`.
+++ * @summary Update an account
+++ */
+++export const UpdateAccountParams = zod.object({
+++  "accountId": zod.coerce.string().uuid()
+++})
+++
+++
+++
+++
+++export const updateAccountBodyBirthDateRegExp = new RegExp('^\\d{4}-\\d{2}-\\d{2}$');
+++export const updateAccountBodyConfirmedDefault = false;
+++
+++export const UpdateAccountBody = zod.object({
+++  "psnEmail": zod.string().email().optional(),
+++  "psnPassword": zod.string().min(1).optional(),
+++  "emailPassword": zod.string().min(1).optional(),
+++  "onlineId": zod.string().min(1).optional(),
+++  "birthDate": zod.string().regex(updateAccountBodyBirthDateRegExp).optional(),
+++  "familyManagementEmail": zod.string().email().optional(),
+++  "confirmed": zod.boolean().default(updateAccountBodyConfirmedDefault)
+++})
+++
+++export const UpdateAccountResponse = zod.object({
+++  "account": zod.object({
+++  "id": zod.string().uuid(),
+++  "gameId": zod.string().uuid(),
+++  "accountCode": zod.string(),
+++  "accountNumberPrefix": zod.string(),
+++  "accountNumberSeq": zod.number(),
+++  "displayNumber": zod.string(),
+++  "onlineId": zod.string().nullable(),
+++  "birthDate": zod.string().nullable(),
+++  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
+++  "createdAt": zod.coerce.date(),
+++  "updatedAt": zod.coerce.date()
+++}).and(zod.object({
+++  "capacities": zod.array(zod.object({
+++  "id": zod.string().uuid(),
+++  "accountId": zod.string().uuid(),
+++  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
+++  "instanceNo": zod.number(),
+++  "displayLabel": zod.string(),
+++  "isFinished": zod.boolean(),
+++  "finishedAt": zod.coerce.date().nullable()
+++}))
+++}))
+++})
+++
+++
++ /**
++  * Returns Capacity rows and derived Account status information required by the Account workspace.
++  * @summary Get account capacities
++@@ -291,3 +342,42 @@ export const GetAccountCapacitiesResponse = zod.object({
++ })
++ 
++ 
+++/**
+++ * Sets, changes, or clears the Account status override. Accepted values are SOLD, INACTIVE, or null. The response includes the recalculated canonical Account status. Capacities and Customer Assignments are not modified.
+++ * @summary Set account status override
+++ */
+++export const SetAccountStatusOverrideParams = zod.object({
+++  "accountId": zod.coerce.string().uuid()
+++})
+++
+++export const SetAccountStatusOverrideBody = zod.object({
+++  "statusOverride": zod.enum(['SOLD', 'INACTIVE']).nullable()
+++})
+++
+++export const SetAccountStatusOverrideResponse = zod.object({
+++  "account": zod.object({
+++  "id": zod.string().uuid(),
+++  "gameId": zod.string().uuid(),
+++  "accountCode": zod.string(),
+++  "accountNumberPrefix": zod.string(),
+++  "accountNumberSeq": zod.number(),
+++  "displayNumber": zod.string(),
+++  "onlineId": zod.string().nullable(),
+++  "birthDate": zod.string().nullable(),
+++  "status": zod.enum(['AVAILABLE', 'PARTIALLY_SOLD', 'SOLD', 'INACTIVE']),
+++  "createdAt": zod.coerce.date(),
+++  "updatedAt": zod.coerce.date()
+++}).and(zod.object({
+++  "capacities": zod.array(zod.object({
+++  "id": zod.string().uuid(),
+++  "accountId": zod.string().uuid(),
+++  "capacityKind": zod.enum(['Z2_PS5', 'Z2_PS4', 'Z3_SHARED_PS5_PS4']),
+++  "instanceNo": zod.number(),
+++  "displayLabel": zod.string(),
+++  "isFinished": zod.boolean(),
+++  "finishedAt": zod.coerce.date().nullable()
+++}))
+++}))
+++})
+++
+++
++diff --git a/lib/api-zod/src/generated/types/index.ts b/lib/api-zod/src/generated/types/index.ts
++index 0582aaa..122eca3 100644
++--- a/lib/api-zod/src/generated/types/index.ts
+++++ b/lib/api-zod/src/generated/types/index.ts
++@@ -32,6 +32,9 @@ export * from './healthStatus';
++ export * from './okResponse';
++ export * from './readinessStatus';
++ export * from './readinessStatusChecks';
+++export * from './setAccountStatusOverrideRequest';
+++export * from './setAccountStatusOverrideRequestStatusOverride';
++ export * from './standardApiError';
++ export * from './standardApiErrorIssuesItem';
+++export * from './updateAccountRequest';
++ export * from './updateGameRequest';
++diff --git a/lib/db/src/index.ts b/lib/db/src/index.ts
++index b8bf97a..e3ee6ba 100644
++--- a/lib/db/src/index.ts
+++++ b/lib/db/src/index.ts
++@@ -4,13 +4,106 @@ import * as schema from "./schema/index.ts";
++ 
++ const { Pool } = pg;
++ 
++-if (!process.env.DATABASE_URL) {
++-  throw new Error(
++-    "DATABASE_URL must be set. Did you forget to provision a database?",
++-  );
+++function getDatabaseUrl(): string {
+++  if (!process.env.DATABASE_URL) {
+++    throw new Error(
+++      "DATABASE_URL must be set. Did you forget to provision a database?",
+++    );
+++  }
+++  return process.env.DATABASE_URL;
++ }
++ 
++-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++-export const db = drizzle(pool, { schema });
+++let poolInstance: pg.Pool | null = null;
+++let dbInstance: ReturnType<typeof drizzle<typeof schema>> | null = null;
+++
+++function getPool(): pg.Pool {
+++  if (!poolInstance) {
+++    poolInstance = new Pool({ connectionString: getDatabaseUrl() });
+++  }
+++  return poolInstance;
+++}
+++
+++function getDb(): ReturnType<typeof drizzle<typeof schema>> {
+++  if (!dbInstance) {
+++    dbInstance = drizzle(getPool(), { schema });
+++  }
+++  return dbInstance;
+++}
+++
+++/** Lazy database connection pool; initialized on first access. */
+++export const pool = new Proxy({} as pg.Pool, {
+++  get(_target, prop, receiver) {
+++    return Reflect.get(getPool(), prop, receiver);
+++  },
+++  has(_target, prop) {
+++    return Reflect.has(getPool(), prop);
+++  },
+++  ownKeys(_target) {
+++    return Reflect.ownKeys(getPool());
+++  },
+++  getOwnPropertyDescriptor(_target, prop) {
+++    return Reflect.getOwnPropertyDescriptor(getPool(), prop);
+++  },
+++  set(_target, prop, value, receiver) {
+++    return Reflect.set(getPool(), prop, value, receiver);
+++  },
+++  defineProperty(_target, prop, attrs) {
+++    return Reflect.defineProperty(getPool(), prop, attrs);
+++  },
+++  deleteProperty(_target, prop) {
+++    return Reflect.deleteProperty(getPool(), prop);
+++  },
+++  apply(_target, thisArg, args) {
+++    return (getPool() as unknown as (...args: unknown[]) => unknown).apply(
+++      thisArg,
+++      args,
+++    );
+++  },
+++  construct(_target, args, newTarget) {
+++    return Reflect.construct(
+++      getPool() as unknown as new (...args: unknown[]) => unknown,
+++      args,
+++      newTarget,
+++    );
+++  },
+++}) as pg.Pool;
+++
+++/** Lazy Drizzle ORM instance; initialized on first access. */
+++export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
+++  get(_target, prop, receiver) {
+++    return Reflect.get(getDb(), prop, receiver);
+++  },
+++  has(_target, prop) {
+++    return Reflect.has(getDb(), prop);
+++  },
+++  ownKeys(_target) {
+++    return Reflect.ownKeys(getDb());
+++  },
+++  getOwnPropertyDescriptor(_target, prop) {
+++    return Reflect.getOwnPropertyDescriptor(getDb(), prop);
+++  },
+++  set(_target, prop, value, receiver) {
+++    return Reflect.set(getDb(), prop, value, receiver);
+++  },
+++  defineProperty(_target, prop, attrs) {
+++    return Reflect.defineProperty(getDb(), prop, attrs);
+++  },
+++  deleteProperty(_target, prop) {
+++    return Reflect.deleteProperty(getDb(), prop);
+++  },
+++  apply(_target, thisArg, args) {
+++    return (getDb() as unknown as (...args: unknown[]) => unknown).apply(
+++      thisArg,
+++      args,
+++    );
+++  },
+++  construct(_target, args, newTarget) {
+++    return Reflect.construct(
+++      getDb() as unknown as new (...args: unknown[]) => unknown,
+++      args,
+++      newTarget,
+++    );
+++  },
+++});
++ 
++ export * from "./schema/index.ts";
++
++=== new file: artifacts/api-server/src/routes/accounts.status-override.test.ts ===
++diff --git a/artifacts/api-server/src/routes/accounts.status-override.test.ts b/artifacts/api-server/src/routes/accounts.status-override.test.ts
++new file mode 100644
++index 0000000..6ff6d03
++--- /dev/null
+++++ b/artifacts/api-server/src/routes/accounts.status-override.test.ts
++@@ -0,0 +1,354 @@
+++import { describe, it, before, after } from "node:test";
+++import assert from "node:assert";
+++import express, { type Express } from "express";
+++import net from "node:net";
+++import { eq, sql } from "drizzle-orm";
+++import { startTestPg, startApiServer } from "../lib/test-pg.ts";
+++import path from "node:path";
+++import { fileURLToPath } from "node:url";
+++import { execSync } from "node:child_process";
+++import { errorHandler } from "../middlewares/error-handler.ts";
+++import { setAccountStatusOverrideHandler } from "./accounts.ts";
+++import { p } from "../lib/req-param.ts";
+++import { createAccount as createAccountService } from "../services/account/index.ts";
+++
+++const __dirname = path.dirname(fileURLToPath(import.meta.url));
+++const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
+++
+++const TEST_MASTER_KEY = Buffer.from(
+++  "0123456789abcdef0123456789abcdef",
+++  "utf8",
+++).toString("base64");
+++
+++let idCounter = 0;
+++function nextId(): string {
+++  idCounter += 1;
+++  return `${Date.now()}_${idCounter}_${Math.random().toString(36).slice(2, 7)}`;
+++}
+++
+++function createRequest(overrides: Record<string, unknown> = {}) {
+++  return {
+++    psnEmail: `test-${nextId()}@example.com`,
+++    psnPassword: "psn-secret",
+++    emailPassword: "email-secret",
+++    onlineId: `TestOnlineId${nextId()}`,
+++    birthDate: "1990-01-01",
+++    familyManagementEmail: `family-${nextId()}@example.com`,
+++    backupCodes: ["code1", "code2"],
+++    ...overrides,
+++  };
+++}
+++
+++function buildTestApp(): Express {
+++  const app = express();
+++  app.use(express.json());
+++  app.patch("/accounts/:id/status-override", (req, res, next) => {
+++    const id = p(req.params["id"]);
+++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+++      res.status(400).json({ error: "id must be a valid UUID", code: "VALIDATION_ERROR" });
+++      return;
+++    }
+++    setAccountStatusOverrideHandler(req, res, next);
+++  });
+++  app.use(errorHandler);
+++  return app;
+++}
+++
+++describe("Set Account Status Override handler", { concurrency: 1 }, () => {
+++  let databaseUrl: string;
+++  let stopPg: () => Promise<void>;
+++  let db: typeof import("@workspace/db");
+++
+++  let publicBaseUrl: string;
+++  let stopPublicServer: () => Promise<void>;
+++  let testApp: Express;
+++  let testServer: ReturnType<typeof express.application.listen>;
+++  let testPort: number;
+++
+++  before(async () => {
+++    const { databaseUrl: dbUrl, stop: stopPgFn } = await startTestPg();
+++    databaseUrl = dbUrl;
+++    stopPg = stopPgFn;
+++
+++    process.env.DATABASE_URL = databaseUrl;
+++    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
+++
+++    execSync("pnpm run build", {
+++      cwd: path.resolve(__dirname, "..", ".."),
+++      env: {
+++        ...process.env,
+++        PORT: "8080",
+++        BASE_PATH: "/api-server",
+++      },
+++      stdio: "ignore",
+++    });
+++
+++    const { baseUrl: serverUrl, stop: stopServerFn } = await startApiServer(
+++      databaseUrl,
+++      DIST_DIR,
+++    );
+++    publicBaseUrl = serverUrl;
+++    stopPublicServer = stopServerFn;
+++
+++    db = await import("@workspace/db");
+++
+++    testApp = buildTestApp();
+++    testPort = await getFreePort();
+++    testServer = testApp.listen(testPort);
+++  });
+++
+++  after(async () => {
+++    if (testServer) {
+++      testServer.close();
+++    }
+++    await stopPublicServer();
+++    if (db) {
+++      await db.pool.end();
+++    }
+++    await stopPg();
+++  });
+++
+++  function statusOverrideUrl(accountId: string): string {
+++    return `http://localhost:${testPort}/accounts/${accountId}/status-override`;
+++  }
+++
+++  async function createGame(
+++    title: string,
+++    platform: "PS5_ONLY" | "PS4_AND_PS5" | "PS4_ONLY" = "PS5_ONLY",
+++  ) {
+++    const uniqueTitle = `${title} ${nextId()}`;
+++    const [game] = await db.db
+++      .insert(db.gamesTable)
+++      .values({
+++        title: uniqueTitle,
+++        titleNormalized: uniqueTitle.toLowerCase().trim(),
+++        platform,
+++        status: "ACTIVE",
+++      })
+++      .returning();
+++    return game;
+++  }
+++
+++  async function createAccount(gameId: string) {
+++    const result = await createAccountService({
+++      ...createRequest(),
+++      gameId,
+++    });
+++    assert.strictEqual(result.kind, "created");
+++    if (result.kind !== "created") throw new Error("failed to create account");
+++    return result.account.id;
+++  }
+++
+++  async function countRows(table: unknown): Promise<number> {
+++    const [row] = (await db.db
+++      .select({ count: sql`count(*)::int` })
+++      .from(table as never)) as { count: number }[];
+++    return row.count;
+++  }
+++
+++  async function getRowCounts() {
+++    return {
+++      accounts: await countRows(db.accountsTable),
+++      capacities: await countRows(db.accountCapacitiesTable),
+++      backupCodes: await countRows(db.accountBackupCodesTable),
+++    };
+++  }
+++
+++  async function getAccountCapacities(accountId: string) {
+++    return db.db
+++      .select()
+++      .from(db.accountCapacitiesTable)
+++      .where(eq(db.accountCapacitiesTable.accountId, accountId))
+++      .orderBy(
+++        db.accountCapacitiesTable.capacityKindV2,
+++        db.accountCapacitiesTable.instanceNo,
+++      );
+++  }
+++
+++  it("public PATCH /accounts/:id/status-override returns 403 and writes nothing", async () => {
+++    const game = await createGame("Disabled Public Status Override Game");
+++    const accountId = await createAccount(game.id);
+++    const before = await getRowCounts();
+++
+++    const res = await fetch(
+++      `${publicBaseUrl}/accounts/${accountId}/status-override`,
+++      {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify({ statusOverride: "SOLD" }),
+++      },
+++    );
+++    assert.strictEqual(res.status, 403);
+++    const data = (await res.json()) as { error: string; code: string };
+++    assert.strictEqual(data.error, "Account operations are not authorized");
+++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+++
+++    const after = await getRowCounts();
+++    assert.strictEqual(after.accounts, before.accounts);
+++    assert.strictEqual(after.capacities, before.capacities);
+++    assert.strictEqual(after.backupCodes, before.backupCodes);
+++  });
+++
+++  it("SOLD override succeeds and returns the recalculated status", async () => {
+++    const game = await createGame("Status Override SOLD Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const res = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++    const data = (await res.json()) as { account: { status: string } };
+++    assert.strictEqual(data.account.status, "SOLD");
+++  });
+++
+++  it("INACTIVE override succeeds and returns the recalculated status", async () => {
+++    const game = await createGame("Status Override INACTIVE Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const res = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "INACTIVE" }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++    const data = (await res.json()) as { account: { status: string } };
+++    assert.strictEqual(data.account.status, "INACTIVE");
+++  });
+++
+++  it("null clears the override and restores the derived status", async () => {
+++    const game = await createGame("Status Override Clear Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const soldRes = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(soldRes.status, 200);
+++
+++    const clearRes = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: null }),
+++    });
+++    assert.strictEqual(clearRes.status, 200);
+++    const data = (await clearRes.json()) as { account: { status: string } };
+++    assert.strictEqual(data.account.status, "AVAILABLE");
+++  });
+++
+++  it("AVAILABLE and PARTIALLY_SOLD are rejected", async () => {
+++    const game = await createGame("Status Override Reject Game");
+++    const accountId = await createAccount(game.id);
+++
+++    for (const statusOverride of ["AVAILABLE", "PARTIALLY_SOLD"]) {
+++      const res = await fetch(statusOverrideUrl(accountId), {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify({ statusOverride }),
+++      });
+++      assert.strictEqual(
+++        res.status,
+++        400,
+++        `expected 400 for statusOverride=${statusOverride}`,
+++      );
+++    }
+++  });
+++
+++  it("rejects unknown fields", async () => {
+++    const game = await createGame("Status Override Unknown Field Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const res = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD", unknownField: "value" }),
+++    });
+++    assert.strictEqual(res.status, 400);
+++  });
+++
+++  it("returns 404 for missing or deleted Account", async () => {
+++    const res = await fetch(
+++      `http://localhost:${testPort}/accounts/550e8400-e29b-41d4-a716-446655440000/status-override`,
+++      {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify({ statusOverride: "SOLD" }),
+++      },
+++    );
+++    assert.strictEqual(res.status, 404);
+++
+++    const game = await createGame("Status Override Deleted Account Game");
+++    const accountId = await createAccount(game.id);
+++    await db.db
+++      .update(db.accountsTable)
+++      .set({ deletedAt: new Date() })
+++      .where(eq(db.accountsTable.id, accountId));
+++
+++    const deletedRes = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(deletedRes.status, 404);
+++  });
+++
+++  it("Capacities remain unchanged", async () => {
+++    const game = await createGame("Status Override Capacities Game");
+++    const accountId = await createAccount(game.id);
+++    const beforeCapacities = await getAccountCapacities(accountId);
+++
+++    const res = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const afterCapacities = await getAccountCapacities(accountId);
+++    assert.deepStrictEqual(
+++      afterCapacities.map((c) => ({
+++        id: c.id,
+++        isFinished: c.isFinished,
+++      })),
+++      beforeCapacities.map((c) => ({ id: c.id, isFinished: c.isFinished })),
+++    );
+++  });
+++
+++  it("derived status is correct after clearing", async () => {
+++    const game = await createGame("Status Override Derived Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const soldRes = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: "SOLD" }),
+++    });
+++    assert.strictEqual(soldRes.status, 200);
+++    const soldData = (await soldRes.json()) as { account: { status: string } };
+++    assert.strictEqual(soldData.account.status, "SOLD");
+++
+++    const clearRes = await fetch(statusOverrideUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ statusOverride: null }),
+++    });
+++    assert.strictEqual(clearRes.status, 200);
+++    const clearData = (await clearRes.json()) as { account: { status: string } };
+++    assert.strictEqual(clearData.account.status, "AVAILABLE");
+++  });
+++});
+++
+++function getFreePort(): Promise<number> {
+++  return new Promise((resolve, reject) => {
+++    const server = net.createServer();
+++    server.listen(0, "127.0.0.1", () => {
+++      const address = server.address();
+++      const port =
+++        typeof address === "object" && address !== null ? address.port : 0;
+++      server.close(() => resolve(port));
+++    });
+++    server.on("error", reject);
+++  });
+++}
++
++=== new file: artifacts/api-server/src/routes/accounts.update.test.ts ===
++diff --git a/artifacts/api-server/src/routes/accounts.update.test.ts b/artifacts/api-server/src/routes/accounts.update.test.ts
++new file mode 100644
++index 0000000..299bd72
++--- /dev/null
+++++ b/artifacts/api-server/src/routes/accounts.update.test.ts
++@@ -0,0 +1,636 @@
+++import { describe, it, before, after } from "node:test";
+++import assert from "node:assert";
+++import express, { type Express } from "express";
+++import net from "node:net";
+++import { eq, sql } from "drizzle-orm";
+++import { startTestPg, startApiServer } from "../lib/test-pg.ts";
+++import path from "node:path";
+++import { fileURLToPath } from "node:url";
+++import { execSync } from "node:child_process";
+++import { errorHandler } from "../middlewares/error-handler.ts";
+++import { updateAccountHandler, createAccountHandler } from "./accounts.ts";
+++import { p } from "../lib/req-param.ts";
+++import { decrypt } from "../lib/crypto.ts";
+++import {
+++  loadAccountMasterKey,
+++  createAccount as createAccountService,
+++  updateAccount as updateAccountService,
+++} from "../services/account/index.ts";
+++
+++const __dirname = path.dirname(fileURLToPath(import.meta.url));
+++const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
+++
+++const TEST_MASTER_KEY = Buffer.from(
+++  "0123456789abcdef0123456789abcdef",
+++  "utf8",
+++).toString("base64");
+++
+++let idCounter = 0;
+++function nextId(): string {
+++  idCounter += 1;
+++  return `${Date.now()}_${idCounter}_${Math.random().toString(36).slice(2, 7)}`;
+++}
+++
+++function createRequest(overrides: Record<string, unknown> = {}) {
+++  return {
+++    psnEmail: `test-${nextId()}@example.com`,
+++    psnPassword: "psn-secret",
+++    emailPassword: "email-secret",
+++    onlineId: `TestOnlineId${nextId()}`,
+++    birthDate: "1990-01-01",
+++    familyManagementEmail: `family-${nextId()}@example.com`,
+++    backupCodes: ["code1", "code2"],
+++    ...overrides,
+++  };
+++}
+++
+++function buildTestApp(): Express {
+++  const app = express();
+++  app.use(express.json());
+++  app.post("/games/:gameId/accounts", (req, res, next) => {
+++    const gameId = p(req.params["gameId"]);
+++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(gameId)) {
+++      res.status(400).json({ error: "gameId must be a valid UUID", code: "VALIDATION_ERROR" });
+++      return;
+++    }
+++    createAccountHandler(req, res, next);
+++  });
+++  app.patch("/accounts/:id", (req, res, next) => {
+++    const id = p(req.params["id"]);
+++    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+++      res.status(400).json({ error: "id must be a valid UUID", code: "VALIDATION_ERROR" });
+++      return;
+++    }
+++    updateAccountHandler(req, res, next);
+++  });
+++  app.use(errorHandler);
+++  return app;
+++}
+++
+++describe("Update Account handler", { concurrency: 1 }, () => {
+++  let databaseUrl: string;
+++  let stopPg: () => Promise<void>;
+++  let db: typeof import("@workspace/db");
+++
+++  let publicBaseUrl: string;
+++  let stopPublicServer: () => Promise<void>;
+++  let testApp: Express;
+++  let testServer: ReturnType<typeof express.application.listen>;
+++  let testPort: number;
+++
+++  before(async () => {
+++    const { databaseUrl: dbUrl, stop: stopPgFn } = await startTestPg();
+++    databaseUrl = dbUrl;
+++    stopPg = stopPgFn;
+++
+++    process.env.DATABASE_URL = databaseUrl;
+++    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
+++
+++    execSync("pnpm run build", {
+++      cwd: path.resolve(__dirname, "..", ".."),
+++      env: {
+++        ...process.env,
+++        PORT: "8080",
+++        BASE_PATH: "/api-server",
+++      },
+++      stdio: "ignore",
+++    });
+++
+++    const { baseUrl: serverUrl, stop: stopServerFn } = await startApiServer(
+++      databaseUrl,
+++      DIST_DIR,
+++    );
+++    publicBaseUrl = serverUrl;
+++    stopPublicServer = stopServerFn;
+++
+++    db = await import("@workspace/db");
+++
+++    testApp = buildTestApp();
+++    testPort = await getFreePort();
+++    testServer = testApp.listen(testPort);
+++  });
+++
+++  after(async () => {
+++    if (testServer) {
+++      testServer.close();
+++    }
+++    await stopPublicServer();
+++    if (db) {
+++      await db.pool.end();
+++    }
+++    await stopPg();
+++  });
+++
+++  function createUrl(gameId: string): string {
+++    return `http://localhost:${testPort}/games/${gameId}/accounts`;
+++  }
+++
+++  function updateUrl(accountId: string): string {
+++    return `http://localhost:${testPort}/accounts/${accountId}`;
+++  }
+++
+++  async function createGame(
+++    title: string,
+++    platform: "PS5_ONLY" | "PS4_AND_PS5" | "PS4_ONLY" = "PS5_ONLY",
+++  ) {
+++    const uniqueTitle = `${title} ${nextId()}`;
+++    const [game] = await db.db
+++      .insert(db.gamesTable)
+++      .values({
+++        title: uniqueTitle,
+++        titleNormalized: uniqueTitle.toLowerCase().trim(),
+++        platform,
+++        status: "ACTIVE",
+++      })
+++      .returning();
+++    return game;
+++  }
+++
+++  async function createAccount(gameId: string) {
+++    const res = await fetch(createUrl(gameId), {
+++      method: "POST",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify(createRequest()),
+++    });
+++    assert.strictEqual(res.status, 201);
+++    const data = (await res.json()) as { account: { id: string } };
+++    return data.account.id;
+++  }
+++
+++  async function countRows(table: unknown): Promise<number> {
+++    const [row] = (await db.db
+++      .select({ count: sql`count(*)::int` })
+++      .from(table as never)) as { count: number }[];
+++    return row.count;
+++  }
+++
+++  async function getRowCounts() {
+++    return {
+++      accounts: await countRows(db.accountsTable),
+++      capacities: await countRows(db.accountCapacitiesTable),
+++      backupCodes: await countRows(db.accountBackupCodesTable),
+++    };
+++  }
+++
+++  async function getAccountCapacities(accountId: string) {
+++    return db.db
+++      .select()
+++      .from(db.accountCapacitiesTable)
+++      .where(eq(db.accountCapacitiesTable.accountId, accountId))
+++      .orderBy(
+++        db.accountCapacitiesTable.capacityKindV2,
+++        db.accountCapacitiesTable.instanceNo,
+++      );
+++  }
+++
+++  async function getBackupCodes(accountId: string) {
+++    return db.db
+++      .select()
+++      .from(db.accountBackupCodesTable)
+++      .where(eq(db.accountBackupCodesTable.accountId, accountId));
+++  }
+++
+++  async function loadAccountRow(accountId: string) {
+++    const [row] = await db.db
+++      .select()
+++      .from(db.accountsTable)
+++      .where(eq(db.accountsTable.id, accountId))
+++      .limit(1);
+++    return row;
+++  }
+++
+++  it("public PATCH /accounts/:id returns 403 and writes nothing", async () => {
+++    const game = await createGame("Disabled Public Update Game");
+++    const accountId = await createAccount(game.id);
+++    const before = await getRowCounts();
+++
+++    const res = await fetch(`${publicBaseUrl}/accounts/${accountId}`, {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: "NewOnlineId" }),
+++    });
+++    assert.strictEqual(res.status, 403);
+++    const data = (await res.json()) as { error: string; code: string };
+++    assert.strictEqual(data.error, "Account operations are not authorized");
+++    assert.strictEqual(data.code, "ACCOUNT_OPS_DISABLED");
+++
+++    const after = await getRowCounts();
+++    assert.strictEqual(after.accounts, before.accounts);
+++    assert.strictEqual(after.capacities, before.capacities);
+++    assert.strictEqual(after.backupCodes, before.backupCodes);
+++  });
+++
+++  it("updates non-sensitive fields and returns safe AccountDetailResponse", async () => {
+++    const game = await createGame("Update Non-Sensitive Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const uniqueOnlineId = `UpdatedOnlineId${nextId()}`;
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: uniqueOnlineId, birthDate: "1995-05-05" }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++    const data = (await res.json()) as { account: Record<string, unknown> };
+++    assert.strictEqual(data.account.onlineId, uniqueOnlineId);
+++    assert.strictEqual(data.account.birthDate, "1995-05-05");
+++    assert.strictEqual(data.account.status, "AVAILABLE");
+++    assert.ok(Array.isArray(data.account.capacities));
+++    assertNoSecrets(JSON.stringify(data));
+++  });
+++
+++  it("updates sensitive fields and re-encrypts them", async () => {
+++    const game = await createGame("Update Sensitive Game");
+++    const accountId = await createAccount(game.id);
+++    const keys = loadAccountMasterKey();
+++
+++    const uniquePsnEmail = `updated-psn-${nextId()}@example.com`;
+++    const uniqueFamilyEmail = `updated-family-${nextId()}@example.com`;
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({
+++        psnEmail: uniquePsnEmail,
+++        familyManagementEmail: uniqueFamilyEmail,
+++        psnPassword: "updated-psn-password",
+++        emailPassword: "updated-email-password",
+++      }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const row = await loadAccountRow(accountId);
+++    assert.strictEqual(
+++      decrypt(row.psnEmailEncrypted as string, keys.encryptionKey),
+++      uniquePsnEmail,
+++    );
+++    assert.strictEqual(
+++      decrypt(row.familyManagementEmailEncryptedV2 as string, keys.encryptionKey),
+++      uniqueFamilyEmail,
+++    );
+++    assert.strictEqual(
+++      decrypt(row.psnPasswordEncrypted as string, keys.encryptionKey),
+++      "updated-psn-password",
+++    );
+++    assert.strictEqual(
+++      decrypt(row.emailPasswordEncryptedV2 as string, keys.encryptionKey),
+++      "updated-email-password",
+++    );
+++  });
+++
+++  it("omitted fields remain unchanged", async () => {
+++    const game = await createGame("Update Omitted Game");
+++    const accountId = await createAccount(game.id);
+++    const before = await loadAccountRow(accountId);
+++
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ birthDate: "2000-01-01" }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const after = await loadAccountRow(accountId);
+++    assert.strictEqual(after.psnEmailEncrypted, before.psnEmailEncrypted);
+++    assert.strictEqual(
+++      after.familyManagementEmailEncryptedV2,
+++      before.familyManagementEmailEncryptedV2,
+++    );
+++    assert.strictEqual(after.psnPasswordEncrypted, before.psnPasswordEncrypted);
+++    assert.strictEqual(
+++      after.emailPasswordEncryptedV2,
+++      before.emailPasswordEncryptedV2,
+++    );
+++    assert.strictEqual(after.onlineId, before.onlineId);
+++    assert.strictEqual(after.birthDate, "2000-01-01");
+++  });
+++
+++  it("rejects immutable and unknown fields", async () => {
+++    const game = await createGame("Update Immutable Game");
+++    const accountId = await createAccount(game.id);
+++
+++    for (const body of [
+++      { id: "550e8400-e29b-41d4-a716-446655440000" },
+++      { gameId: game.id },
+++      { accountCode: "ACC-999999" },
+++      { displayNumber: "X-999" },
+++      { accountNumberPrefix: "X" },
+++      { accountNumberSeq: 99 },
+++      { status: "INACTIVE" },
+++      { statusOverride: "SOLD" },
+++      { backupCodes: ["new"] },
+++      { createdAt: "2020-01-01T00:00:00Z" },
+++      { updatedAt: "2020-01-01T00:00:00Z" },
+++      { unknownField: "value" },
+++    ]) {
+++      const res = await fetch(updateUrl(accountId), {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify(body),
+++      });
+++      assert.strictEqual(res.status, 400, `expected 400 for ${JSON.stringify(body)}`);
+++    }
+++  });
+++
+++  it("rejects empty and confirmed-only bodies", async () => {
+++    const game = await createGame("Update Empty Body Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const emptyRes = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({}),
+++    });
+++    assert.strictEqual(emptyRes.status, 400);
+++
+++    const confirmedRes = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ confirmed: true }),
+++    });
+++    assert.strictEqual(confirmedRes.status, 400);
+++  });
+++
+++  it("rejects invalid UUID, email, and birthDate", async () => {
+++    const res = await fetch(`http://localhost:${testPort}/accounts/not-a-uuid`, {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: "Updated" }),
+++    });
+++    assert.strictEqual(res.status, 400);
+++
+++    const game = await createGame("Update Invalid Fields Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const emailRes = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ psnEmail: "not-an-email" }),
+++    });
+++    assert.strictEqual(emailRes.status, 400);
+++
+++    const birthRes = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ birthDate: "1990-99-99" }),
+++    });
+++    assert.strictEqual(birthRes.status, 400);
+++  });
+++
+++  it("returns 404 for missing or deleted Account", async () => {
+++    const res = await fetch(
+++      `http://localhost:${testPort}/accounts/550e8400-e29b-41d4-a716-446655440000`,
+++      {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify({ onlineId: "Updated" }),
+++      },
+++    );
+++    assert.strictEqual(res.status, 404);
+++
+++    const game = await createGame("Update Deleted Account Game");
+++    const accountId = await createAccount(game.id);
+++    await db.db
+++      .update(db.accountsTable)
+++      .set({ deletedAt: new Date() })
+++      .where(eq(db.accountsTable.id, accountId));
+++
+++    const deletedRes = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: "Updated" }),
+++    });
+++    assert.strictEqual(deletedRes.status, 404);
+++  });
+++
+++  it("returns duplicate warning against another Account with zero writes", async () => {
+++    const game = await createGame("Update Duplicate Game");
+++    const firstRequest = createRequest();
+++    const first = await createAccountService({
+++      ...firstRequest,
+++      gameId: game.id,
+++    });
+++    assert.strictEqual(first.kind, "created");
+++    if (first.kind !== "created") return;
+++
+++    const secondRequest = createRequest({
+++      psnEmail: `different-psn-${nextId()}@example.com`,
+++      onlineId: `DifferentOnlineId${nextId()}`,
+++      familyManagementEmail: `different-family-${nextId()}@example.com`,
+++    });
+++    const second = await createAccountService({
+++      ...secondRequest,
+++      gameId: game.id,
+++    });
+++    assert.strictEqual(second.kind, "created");
+++    if (second.kind !== "created") return;
+++
+++    const before = await getRowCounts();
+++    const res = await fetch(updateUrl(second.account.id), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({
+++        psnEmail: firstRequest.psnEmail,
+++        onlineId: firstRequest.onlineId,
+++      }),
+++    });
+++    assert.strictEqual(res.status, 409);
+++    const data = (await res.json()) as {
+++      code: string;
+++      detail: { duplicateFields: string[] };
+++    };
+++    assert.strictEqual(data.code, "DUPLICATE_WARNING");
+++    assert.ok(data.detail.duplicateFields.includes("psnEmail"));
+++    assert.ok(data.detail.duplicateFields.includes("onlineId"));
+++
+++    const after = await getRowCounts();
+++    assert.strictEqual(after.accounts, before.accounts);
+++    assert.strictEqual(after.capacities, before.capacities);
+++    assert.strictEqual(after.backupCodes, before.backupCodes);
+++  });
+++
+++  it("does not warn when updating to the same Account's own values", async () => {
+++    const game = await createGame("Update Self Match Game");
+++    const request = createRequest();
+++    const result = await createAccountService({ ...request, gameId: game.id });
+++    assert.strictEqual(result.kind, "created");
+++    if (result.kind !== "created") return;
+++
+++    const res = await fetch(updateUrl(result.account.id), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({
+++        psnEmail: (request.psnEmail as string).toUpperCase(),
+++        onlineId: (request.onlineId as string).toUpperCase(),
+++        familyManagementEmail: (request.familyManagementEmail as string).toUpperCase(),
+++      }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++  });
+++
+++  it("confirmed duplicate succeeds and allows the update", async () => {
+++    const game = await createGame("Update Confirmed Duplicate Game");
+++    const firstRequest = createRequest();
+++    const first = await createAccountService({
+++      ...firstRequest,
+++      gameId: game.id,
+++    });
+++    assert.strictEqual(first.kind, "created");
+++    if (first.kind !== "created") return;
+++
+++    const secondRequest = createRequest({
+++      psnEmail: `confirmed-dup-psn-${nextId()}@example.com`,
+++      onlineId: `ConfirmedDupOnlineId${nextId()}`,
+++      familyManagementEmail: `confirmed-dup-family-${nextId()}@example.com`,
+++    });
+++    const second = await createAccountService({
+++      ...secondRequest,
+++      gameId: game.id,
+++    });
+++    assert.strictEqual(second.kind, "created");
+++    if (second.kind !== "created") return;
+++
+++    const res = await fetch(updateUrl(second.account.id), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({
+++        psnEmail: firstRequest.psnEmail,
+++        confirmed: true,
+++      }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const row = await loadAccountRow(second.account.id);
+++    const keys = loadAccountMasterKey();
+++    assert.strictEqual(
+++      decrypt(row.psnEmailEncrypted as string, keys.encryptionKey),
+++      firstRequest.psnEmail,
+++    );
+++  });
+++
+++  it("fails closed and rolls back when encryption key is missing", async () => {
+++    const game = await createGame("Update Missing Key Game");
+++    const accountId = await createAccount(game.id);
+++    const before = await getRowCounts();
+++
+++    const original = process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
+++    delete process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
+++    try {
+++      const res = await fetch(updateUrl(accountId), {
+++        method: "PATCH",
+++        headers: { "Content-Type": "application/json" },
+++        body: JSON.stringify({ psnEmail: "new@example.com" }),
+++      });
+++      assert.strictEqual(res.status, 500);
+++      const after = await getRowCounts();
+++      assert.strictEqual(after.accounts, before.accounts);
+++      assert.strictEqual(after.capacities, before.capacities);
+++      assert.strictEqual(after.backupCodes, before.backupCodes);
+++    } finally {
+++      process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
+++    }
+++  });
+++
+++  it("keeps Backup Codes and Capacities unchanged", async () => {
+++    const game = await createGame("Update Backup Capacity Game");
+++    const accountId = await createAccount(game.id);
+++    const beforeCapacities = await getAccountCapacities(accountId);
+++    const beforeBackupCodes = await getBackupCodes(accountId);
+++
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: `UpdatedCapOnlineId${nextId()}` }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const afterCapacities = await getAccountCapacities(accountId);
+++    const afterBackupCodes = await getBackupCodes(accountId);
+++    assert.deepStrictEqual(
+++      afterCapacities.map((c) => c.id),
+++      beforeCapacities.map((c) => c.id),
+++    );
+++    assert.deepStrictEqual(
+++      afterBackupCodes.map((c) => c.id),
+++      beforeBackupCodes.map((c) => c.id),
+++    );
+++  });
+++
+++  it("keeps identifiers unchanged", async () => {
+++    const game = await createGame("Update Identifiers Game");
+++    const accountId = await createAccount(game.id);
+++    const before = await loadAccountRow(accountId);
+++
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({ onlineId: `UpdatedIdentifierOnlineId${nextId()}` }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++
+++    const after = await loadAccountRow(accountId);
+++    assert.strictEqual(after.accountCode, before.accountCode);
+++    assert.strictEqual(after.accountNumberPrefix, before.accountNumberPrefix);
+++    assert.strictEqual(after.accountNumberSeq, before.accountNumberSeq);
+++    assert.strictEqual(after.displayNumber, before.displayNumber);
+++    assert.strictEqual(after.gameId, before.gameId);
+++  });
+++
+++  it("response contains no secrets", async () => {
+++    const game = await createGame("Update Private Data Game");
+++    const accountId = await createAccount(game.id);
+++
+++    const res = await fetch(updateUrl(accountId), {
+++      method: "PATCH",
+++      headers: { "Content-Type": "application/json" },
+++      body: JSON.stringify({
+++        psnEmail: `private-psn-${nextId()}@example.com`,
+++        psnPassword: "private-psn-password",
+++        emailPassword: "private-email-password",
+++        familyManagementEmail: `private-family-${nextId()}@example.com`,
+++      }),
+++    });
+++    assert.strictEqual(res.status, 200);
+++    const data = (await res.json()) as { account: Record<string, unknown> };
+++    assertNoSecrets(JSON.stringify(data));
+++    const body = JSON.stringify(data).toLowerCase();
+++    assert.ok(!body.includes("password"), "response leaks password");
+++    assert.ok(!body.includes("email"), "response leaks email");
+++    assert.ok(!body.includes("encrypted"), "response leaks encrypted value");
+++    assert.ok(!body.includes("ciphertext"), "response leaks ciphertext");
+++    assert.ok(!body.includes("hash"), "response leaks hash");
+++  });
+++});
+++
+++function assertNoSecrets(body: string): void {
+++  const lower = body.toLowerCase();
+++  const patterns = [
+++    "encrypted",
+++    "ciphertext",
+++    "hash",
+++    "password",
+++    "backup",
+++    "secret",
+++    "psn_email",
+++    "email_password",
+++    "family_management",
+++  ];
+++  for (const pattern of patterns) {
+++    assert.ok(
+++      !lower.includes(pattern),
+++      `response body leaks a secret/encrypted/hash value (pattern: ${pattern})`,
+++    );
+++  }
+++}
+++
+++function getFreePort(): Promise<number> {
+++  return new Promise((resolve, reject) => {
+++    const server = net.createServer();
+++    server.listen(0, "127.0.0.1", () => {
+++      const address = server.address();
+++      const port =
+++        typeof address === "object" && address !== null ? address.port : 0;
+++      server.close(() => resolve(port));
+++    });
+++    server.on("error", reject);
+++  });
+++}
++
++=== new file: lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts ===
++diff --git a/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts
++new file mode 100644
++index 0000000..3d5ffd4
++--- /dev/null
+++++ b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts
++@@ -0,0 +1,12 @@
+++/**
+++ * Generated by orval v8.18.0 🍺
+++ * Do not edit manually.
+++ * Api
+++ * API specification
+++ * OpenAPI spec version: 0.1.0
+++ */
+++import type { SetAccountStatusOverrideRequestStatusOverride } from './setAccountStatusOverrideRequestStatusOverride';
+++
+++export interface SetAccountStatusOverrideRequest {
+++  statusOverride: SetAccountStatusOverrideRequestStatusOverride;
+++}
++
++=== new file: lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts ===
++diff --git a/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts
++new file mode 100644
++index 0000000..1ce9a12
++--- /dev/null
+++++ b/lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts
++@@ -0,0 +1,15 @@
+++/**
+++ * Generated by orval v8.18.0 🍺
+++ * Do not edit manually.
+++ * Api
+++ * API specification
+++ * OpenAPI spec version: 0.1.0
+++ */
+++
+++export type SetAccountStatusOverrideRequestStatusOverride = typeof SetAccountStatusOverrideRequestStatusOverride[keyof typeof SetAccountStatusOverrideRequestStatusOverride] | null;
+++
+++
+++export const SetAccountStatusOverrideRequestStatusOverride = {
+++  SOLD: 'SOLD',
+++  INACTIVE: 'INACTIVE',
+++} as const;
++
++=== new file: lib/api-zod/src/generated/types/updateAccountRequest.ts ===
++diff --git a/lib/api-zod/src/generated/types/updateAccountRequest.ts b/lib/api-zod/src/generated/types/updateAccountRequest.ts
++new file mode 100644
++index 0000000..945e9f4
++--- /dev/null
+++++ b/lib/api-zod/src/generated/types/updateAccountRequest.ts
++@@ -0,0 +1,21 @@
+++/**
+++ * Generated by orval v8.18.0 🍺
+++ * Do not edit manually.
+++ * Api
+++ * API specification
+++ * OpenAPI spec version: 0.1.0
+++ */
+++
+++export interface UpdateAccountRequest {
+++  psnEmail?: string;
+++  /** @minLength 1 */
+++  psnPassword?: string;
+++  /** @minLength 1 */
+++  emailPassword?: string;
+++  /** @minLength 1 */
+++  onlineId?: string;
+++  /** @pattern ^\d{4}-\d{2}-\d{2}$ */
+++  birthDate?: string;
+++  familyManagementEmail?: string;
+++  confirmed?: boolean;
+++}
++
++=== new file: playsyncer-ps03d5-4-update-status-backend-review.zip ===
++diff --git a/playsyncer-ps03d5-4-update-status-backend-review.zip b/playsyncer-ps03d5-4-update-status-backend-review.zip
++new file mode 100644
++index 0000000..be75a8f
++Binary files /dev/null and b/playsyncer-ps03d5-4-update-status-backend-review.zip differ
++
++=== new file: reports/diff.patch ===
+
+=== new file: reports/manifest.txt ===
+diff --git a/reports/manifest.txt b/reports/manifest.txt
+new file mode 100644
+index 0000000..5c1d1d7
+--- /dev/null
++++ b/reports/manifest.txt
+@@ -0,0 +1,26 @@
++PS-03D5-4 Update and Status Override Backend Review Package
++Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
++
++Git status:
++ M artifacts/api-server/src/lib/account-contract.test.ts
++ M artifacts/api-server/src/routes/accounts.disabled.test.ts
++ M artifacts/api-server/src/routes/accounts.ts
++ M artifacts/api-server/src/services/account/index.ts
++ M docs/CURRENT_PHASE.md
++ M lib/api-client-react/src/generated/api.schemas.ts
++ M lib/api-client-react/src/generated/api.ts
++ M lib/api-spec/openapi.yaml
++ M lib/api-zod/src/generated/api.ts
++ M lib/api-zod/src/generated/types/index.ts
++ M lib/db/src/index.ts
++?? artifacts/api-server/src/routes/accounts.status-override.test.ts
++?? artifacts/api-server/src/routes/accounts.update.test.ts
++?? attached_assets/
++?? lib/api-zod/src/generated/types/setAccountStatusOverrideRequest.ts
++?? lib/api-zod/src/generated/types/setAccountStatusOverrideRequestStatusOverride.ts
++?? lib/api-zod/src/generated/types/updateAccountRequest.ts
++?? playsyncer-ps03d5-4-update-status-backend-review.zip
++?? reports/diff.patch
++?? reports/manifest.txt
++?? reports/report.md
++?? reports/validation.txt
+
+=== new file: reports/report.md ===
+diff --git a/reports/report.md b/reports/report.md
+new file mode 100644
+index 0000000..7d20a6b
+--- /dev/null
++++ b/reports/report.md
+@@ -0,0 +1,48 @@
++# PS-03D5-4 — Update and Status Override Backend Review Package
++
++## Summary
++
++This review package adds the backend-only implementations for `PATCH /api/accounts/{accountId}` and `PATCH /api/accounts/{accountId}/status-override`, as required by PS-03D5-4. Both production routes are intentionally hard-disabled at runtime with `403 ACCOUNT_OPS_DISABLED`, keeping activation deferred to PS-03D7.
++
++## What changed
++
++- **OpenAPI contract** (`lib/api-spec/openapi.yaml`): added the two new PATCH paths and the `UpdateAccountRequest` and `SetAccountStatusOverrideRequest` schemas.
++- **Generated clients** (`lib/api-client-react`, `lib/api-zod`): regenerated hooks, Zod input types, and schema exports via Orval.
++- **Service layer** (`artifacts/api-server/src/services/account/index.ts`): added `updateAccount` and `setAccountStatusOverride` with duplicate detection, advisory locking, encryption, transaction rollback, and the `statusOverride` return value.
++- **Routes** (`artifacts/api-server/src/routes/accounts.ts`): added `updateAccountHandler` and `setAccountStatusOverrideHandler` and wired the production routes to return `403 ACCOUNT_OPS_DISABLED`.
++- **Tests**: added `accounts.update.test.ts`, `accounts.status-override.test.ts`, updated `accounts.disabled.test.ts` for the new `code` field and the status-override route, and updated `account-contract.test.ts` to allow the new operations while keeping the frontend read-only.
++- **Database module** (`lib/db/src/index.ts`): converted the singleton pool to lazy initialization so integration tests that change `DATABASE_URL` in their `before` hooks are isolated from the environment’s default database.
++- **Docs** (`docs/CURRENT_PHASE.md`): moved to `IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW`.
++
++## Validation results
++
++All validation commands ran with exit code 0 (see `reports/validation.txt`):
++
++- `pnpm --filter @workspace/api-spec run codegen`
++- `pnpm run typecheck`
++- `pnpm --filter @workspace/api-server run test`
++- `pnpm --filter @workspace/api-server run typecheck`
++
++Test summary: 124 tests, 0 failures, 9 suites.
++
++## Smoke test — production routes disabled
++
++Started the API server and confirmed the disabled routes return the expected 403 with code `ACCOUNT_OPS_DISABLED`:
++
++```
++PATCH /api/accounts/{uuid}
++{ "error": "Account operations are not authorized", "code": "ACCOUNT_OPS_DISABLED" }
++
++PATCH /api/accounts/{uuid}/status-override
++{ "error": "Account operations are not authorized", "code": "ACCOUNT_OPS_DISABLED" }
++```
++
++## Frontend read-only boundary
++
++The active PlaySyncer frontend remains read-only: `account-contract.test.ts` asserts that `useUpdateAccount`, `useSetAccountStatusOverride`, `updateAccount`, and `setAccountStatusOverride` are not referenced in `artifacts/playsyncer/src`.
++
++## Notes
++
++- No runtime activation is enabled; the routes are gated behind an explicit 403 response.
++- No database schema or migration changes were made.
++- The DB module was adjusted to lazy-init the connection pool to fix integration-test cross-contamination caused by the environment-scoped `DATABASE_URL` and singleton pool.
+
+=== new file: reports/validation.txt ===
+diff --git a/reports/validation.txt b/reports/validation.txt
+new file mode 100644
+index 0000000..f90a2a7
+--- /dev/null
++++ b/reports/validation.txt
+@@ -0,0 +1,9 @@
++=== Validation Suite ===
++Run: pnpm --filter @workspace/api-spec run codegen
++codegen: exit 0
++Run: pnpm run typecheck
++typecheck: exit 0
++Run: pnpm --filter @workspace/api-server run test
++api-server-test: exit 0
++Run: pnpm --filter @workspace/api-server run typecheck
++api-server-typecheck: exit 0

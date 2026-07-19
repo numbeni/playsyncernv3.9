@@ -1,0 +1,179 @@
+Continue in the current PlaySyncer workspace.
+
+Start only:
+
+PS-03D5-4 — Update Account and Status Override Backend, Runtime Disabled
+
+Before changing anything, inspect the current Account service, routes, OpenAPI, generated clients, schemas, tests, encryption helpers, duplicate logic, status derivation, and phase docs.
+
+Do not activate Account mutations.
+Do not start Delete, Capacity mutations, frontend write UI, Auth, RBAC, Audit, Secret Reveal, or Backup Code management.
+Do not change schema, migrations, dependencies, Replit infrastructure, or production deployment behavior.
+
+Implement:
+
+1. PATCH /api/accounts/{accountId}
+   operationId: updateAccount
+
+Request may contain only:
+- psnEmail
+- psnPassword
+- emailPassword
+- onlineId
+- birthDate
+- familyManagementEmail
+- confirmed
+
+Rules:
+- at least one editable field is required; confirmed alone is invalid
+- omitted fields remain unchanged
+- reject id, gameId, accountCode, displayNumber, accountNumberPrefix, accountNumberSeq, status, statusOverride, backupCodes, createdAt, updatedAt, and unknown fields
+- birthDate must be a real YYYY-MM-DD date
+- updated sensitive fields must be re-encrypted
+- updated lookup fields must regenerate lookup hashes
+- omitted sensitive fields must not be decrypted or re-encrypted
+- PSN Email and Family Email comparisons are case-insensitive
+- Online ID is stored trimmed and compared case-insensitively
+- immutable identifiers, Backup Codes, Capacities, and gameId must remain unchanged
+- operation must be atomic
+- return only the safe Account DTO
+
+Duplicate confirmation:
+- check psnEmail, familyManagementEmail, and onlineId
+- exclude the Account being updated
+- unchanged values must not trigger self-duplicate warnings
+- unconfirmed duplicate returns HTTP 409 with code DUPLICATE_WARNING and field names only
+- duplicate warning performs zero writes
+- retrying the same request with confirmed: true may proceed
+- confirmed only bypasses the duplicate warning, not validation or security checks
+- preserve safe concurrency locking
+
+2. PATCH /api/accounts/{accountId}/status-override
+   operationId: setAccountStatusOverride
+
+Accept exactly:
+- SOLD
+- INACTIVE
+- null
+
+Rules:
+- null clears the override
+- reject AVAILABLE and PARTIALLY_SOLD
+- do not modify Capacities or Customer Assignments
+- return the safe Account DTO with the recalculated canonical status
+- preserve status precedence:
+  INACTIVE override > SOLD override > all finished SOLD > all available AVAILABLE > otherwise PARTIALLY_SOLD
+
+Add OpenAPI contracts and regenerate clients only through the existing codegen command. Do not manually edit generated files.
+
+Implement exported testable handlers:
+- updateAccountHandler
+- setAccountStatusOverrideHandler
+
+Production routes must remain hard-disabled and return before validation or writes:
+
+{
+  "error": "Account operations are not authorized",
+  "code": "ACCOUNT_OPS_DISABLED"
+}
+
+Do not add feature flags or environment switches. Mount real handlers only in test-only Express apps.
+
+Add focused tests covering:
+
+Update:
+- non-sensitive and sensitive updates
+- omitted fields unchanged
+- immutable and unknown fields rejected
+- empty and confirmed-only bodies rejected
+- invalid UUID, email, and birthDate rejected
+- missing/deleted Account returns 404
+- duplicate against another Account returns 409
+- self-match does not warn
+- duplicate warning performs zero writes
+- confirmed duplicate succeeds
+- missing encryption key and encryption/database failures roll back
+- Backup Codes and Capacities remain unchanged
+- identifiers remain unchanged
+- response contains no secrets
+
+Status override:
+- SOLD succeeds
+- INACTIVE succeeds
+- null clears override
+- AVAILABLE and PARTIALLY_SOLD rejected
+- unknown fields rejected
+- missing/deleted Account returns 404
+- Capacities remain unchanged
+- derived status is correct after clearing
+
+Runtime safety:
+- both public PATCH routes return 403 + ACCOUNT_OPS_DISABLED
+- zero Account, Capacity, and Backup Code writes
+- production routes do not call real handlers
+- active frontend does not import or call update/status mutation hooks
+
+Preserve all existing Create Account behavior and tests.
+
+Update docs/CURRENT_PHASE.md to:
+
+Current stage:
+PS-03D5 — Account Mutation Implementation, Runtime Disabled
+
+Current sub-stage:
+PS-03D5-4 — Update and Status Override Backend, Runtime Disabled
+
+Current status:
+PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+
+Next planned sub-stage:
+PS-03D5-5 — Delete Account Safety Boundary
+
+Do not mark PS-03D5-4 approved or closed.
+
+Run and report actual exit codes:
+
+- pnpm install --frozen-lockfile
+- pnpm --filter @workspace/api-spec run codegen
+- pnpm run typecheck
+- pnpm --filter @workspace/api-server run test
+- pnpm --filter @workspace/api-server run build
+- pnpm --filter @workspace/db run test
+- pnpm --filter @workspace/db run test:migrations
+- pnpm --filter @workspace/playsyncer run test
+- PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build
+- git diff --check
+
+Do not commit yet.
+
+Create:
+
+- reports/ps03d5-4-update-status-backend-report.md
+- reports/ps03d5-4-update-status-backend.diff
+- reports/ps03d5-4-update-status-backend-manifest.txt
+- playsyncer-ps03d5-4-update-status-backend-review.zip
+
+The ZIP must contain the complete source and exclude .git, node_modules, build output, caches, database data, Secrets, attached_assets/Pasted-*, old or nested ZIPs, logs, and PID files.
+
+In the final Replit response print:
+
+- exact files changed
+- OpenAPI operations and generated hooks added
+- service functions and handlers added
+- test files and test counts
+- every validation command and exit code
+- proof that production PATCH routes remain 403
+- confirmation that frontend remains read-only
+- confirmation that schema and migrations did not change
+- final git status
+- ZIP filename, byte size, and SHA-256
+
+Final status must be exactly one of:
+
+- PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+- PS-03D5-4 — TEST OR BUILD FAILURE
+- PS-03D5-4 — CONTRACT CONFLICT
+- PS-03D5-4 — RUNTIME ACTIVATION BLOCKER
+- PS-03D5-4 — SECURITY BLOCKER
+- PS-03D5-4 — SCOPE VIOLATION
+- PS-03D5-4 — PACKAGING FAILURE
