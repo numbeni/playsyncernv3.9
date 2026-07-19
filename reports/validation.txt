@@ -1,9 +1,0 @@
-=== Validation Suite ===
-Run: pnpm --filter @workspace/api-spec run codegen
-codegen: exit 0
-Run: pnpm run typecheck
-typecheck: exit 0
-Run: pnpm --filter @workspace/api-server run test
-api-server-test: exit 0
-Run: pnpm --filter @workspace/api-server run typecheck
-api-server-typecheck: exit 0

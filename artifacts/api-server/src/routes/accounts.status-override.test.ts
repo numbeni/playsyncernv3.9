@@ -8,9 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { errorHandler } from "../middlewares/error-handler.ts";
-import { setAccountStatusOverrideHandler } from "./accounts.ts";
 import { p } from "../lib/req-param.ts";
-import { createAccount as createAccountService } from "../services/account/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
@@ -19,6 +17,9 @@ const TEST_MASTER_KEY = Buffer.from(
   "0123456789abcdef0123456789abcdef",
   "utf8",
 ).toString("base64");
+
+let setAccountStatusOverrideHandler: typeof import("./accounts.ts")["setAccountStatusOverrideHandler"];
+let createAccountService: typeof import("../services/account/index.ts")["createAccount"];
 
 let idCounter = 0;
 function nextId(): string {
@@ -72,6 +73,14 @@ describe("Set Account Status Override handler", { concurrency: 1 }, () => {
 
     process.env.DATABASE_URL = databaseUrl;
     process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
+
+    // Load modules that depend on @workspace/db only after the disposable test
+    // database URL is set, so the production DB connection architecture is not
+    // modified to accommodate tests.
+    const accountsModule = await import("./accounts.ts");
+    setAccountStatusOverrideHandler = accountsModule.setAccountStatusOverrideHandler;
+    const serviceModule = await import("../services/account/index.ts");
+    createAccountService = serviceModule.createAccount;
 
     execSync("pnpm run build", {
       cwd: path.resolve(__dirname, "..", ".."),

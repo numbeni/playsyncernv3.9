@@ -1,0 +1,537 @@
+
+===== pnpm install --frozen-lockfile =====
+Command: pnpm install --frozen-lockfile
+Scope: all 9 workspace projects
+Lockfile is up to date, resolution step is skipped
+Already up to date
+
+. preinstall$ sh -c 'rm -f package-lock.json yarn.lock; case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead" >&2; exit 1 ;; esac'
+. preinstall: Done
+Done in 1.5s using pnpm v10.26.1
+Exit code: 0
+Duration: 2s
+
+===== pnpm --filter @workspace/api-spec run codegen =====
+Command: pnpm --filter @workspace/api-spec run codegen
+
+> @workspace/api-spec@0.0.0 codegen /home/runner/workspace/lib/api-spec
+> orval --config ./orval.config.ts && pnpm -w run typecheck:libs
+
+🍻 orval v8.18.0 - A swagger client generator for typescript
+api-client-react Cleaning output folder
+🎉 api-client-react - Your OpenAPI spec has been converted into ready to use orval!
+zod Cleaning output folder
+🎉 zod - Your OpenAPI spec has been converted into ready to use orval!
+
+> workspace@0.0.0 typecheck:libs /home/runner/workspace
+> tsc --build
+
+Exit code: 0
+Duration: 1s
+
+===== pnpm run typecheck =====
+Command: pnpm run typecheck
+
+> workspace@0.0.0 typecheck /home/runner/workspace
+> pnpm run typecheck:libs && pnpm -r --filter "./artifacts/**" --filter "./scripts" --if-present run typecheck
+
+
+> workspace@0.0.0 typecheck:libs /home/runner/workspace
+> tsc --build
+
+Scope: 4 of 9 workspace projects
+artifacts/api-server typecheck$ tsc -p tsconfig.json --noEmit
+artifacts/mockup-sandbox typecheck$ tsc -p tsconfig.json --noEmit
+artifacts/api-server typecheck: Done
+artifacts/playsyncer typecheck$ tsc -p tsconfig.json --noEmit
+artifacts/mockup-sandbox typecheck: Done
+scripts typecheck$ tsc -p tsconfig.json --noEmit
+scripts typecheck: Done
+artifacts/playsyncer typecheck: Done
+Exit code: 0
+Duration: 8s
+
+===== pnpm --filter @workspace/api-server run typecheck =====
+Command: pnpm --filter @workspace/api-server run typecheck
+
+> @workspace/api-server@0.0.0 typecheck /home/runner/workspace/artifacts/api-server
+> tsc -p tsconfig.json --noEmit
+
+Exit code: 0
+Duration: 1s
+
+===== pnpm --filter @workspace/api-server run test =====
+Command: pnpm --filter @workspace/api-server run test
+
+> @workspace/api-server@0.0.0 test /home/runner/workspace/artifacts/api-server
+> node --import ./test-loader.mjs --test src/lib/*.test.ts src/routes/*.test.ts src/services/**/*.test.ts
+
+▶ Account OpenAPI contract
+  ✔ generates a valid client from OpenAPI (1957.843976ms)
+  ✔ includes all required Account schemas (4.562717ms)
+  ✔ does not expose secret fields in safe Account DTO schemas (0.607953ms)
+  ✔ does not expose matched values or Account IDs in DuplicateWarningResponse (0.716755ms)
+  ✔ includes only approved read-only Account hooks (3.929996ms)
+  ✔ includes only approved read-only Account paths in OpenAPI (3.023434ms)
+  ✔ does not allow the active frontend to import Account mutation hooks (18.345101ms)
+✔ Account OpenAPI contract (1990.372792ms)
+▶ crypto utilities
+  ✔ encrypt/decrypt round-trips plaintext (1.324318ms)
+  ✔ encrypt produces different ciphertext for the same plaintext (random IV) (0.303583ms)
+  ✔ decrypt fails with the wrong key (0.520996ms)
+  ✔ decrypt fails on tampered ciphertext (auth tag check) (0.352719ms)
+  ✔ rejects keys that are not exactly 32 bytes (0.10776ms)
+  ✔ hashForLookup is deterministic for the same key and input (0.475741ms)
+  ✔ hashForLookup differs for different inputs or keys (0.277537ms)
+  ✔ hashForLookup output looks like a hex sha256 digest (0.269177ms)
+✔ crypto utilities (4.453076ms)
+▶ Create Account handler
+  ✔ public POST /games/:gameId/accounts returns 403 and writes nothing (159.34274ms)
+  ✔ valid request returns HTTP 201 and safe AccountDetailResponse (112.260711ms)
+  ✔ creates expected Capacity template and Backup Codes (27.498366ms)
+  ✔ missing Game returns HTTP 404 (13.235696ms)
+  ✔ deleted Game returns HTTP 404 (11.778943ms)
+  ✔ inactive Game returns HTTP 409 StandardApiError and writes nothing (24.95409ms)
+  ✔ invalid UUID returns HTTP 400 (1.714185ms)
+  ✔ invalid Email returns HTTP 400 (6.376194ms)
+  ✔ invalid birthDate returns HTTP 400 (5.699203ms)
+  ✔ empty Backup Code array returns HTTP 400 (5.117221ms)
+  ✔ whitespace-only Backup Code returns HTTP 400 (6.286833ms)
+  ✔ unexpected body fields are rejected (4.299187ms)
+  ✔ malformed JSON body returns HTTP 400 INVALID_JSON and performs zero writes (18.497952ms)
+  ✔ body gameId is rejected as an unexpected field with zero writes (21.38095ms)
+  ✔ statusOverride is rejected (5.267316ms)
+  ✔ duplicate warning matches the OpenAPI response shape and performs no writes (47.690185ms)
+  ✔ confirmed duplicate request returns HTTP 201 (30.263722ms)
+  ✔ missing encryption key fails closed and performs no writes (26.556086ms)
+  ✔ IdentifierConflictError returns HTTP 409 with ACCOUNT_IDENTIFIER_CONFLICT and zero writes (51.159361ms)
+  ✔ unexpected error in the create account route returns 500 INTERNAL_ERROR and hides details (10.748257ms)
+  ✔ forced database failure rolls back Account, Capacities, and Backup Codes (78.394635ms)
+[11:24:26.775] [31mERROR[39m (2261): [36mEncryption configuration error during account creation[39m
+    err: {
+      "type": "EncryptionError",
+      "message": "PLAYSYNCER_ACCOUNT_MASTER_KEY is not set",
+      "stack":
+          AccountDomainError: PLAYSYNCER_ACCOUNT_MASTER_KEY is not set
+              at loadAccountMasterKey (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:146:11)
+              at createAccount (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:479:16)
+              at createAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:190:26)
+              at file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.create.test.ts:51:5
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at next (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:157:13)
+              at Route.dispatch (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:117:3)
+              at handle (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:435:11)
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at /home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:295:15
+      "name": "AccountDomainError"
+    }
+[11:24:26.848] [31mERROR[39m (2261): [36mUnhandled error[39m
+    err: {
+      "type": "Error",
+      "message": "secret database password: xyzzy-stack-trace",
+      "stack":
+          Error: secret database password: xyzzy-stack-trace
+              at file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.create.test.ts:543:13
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at next (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:157:13)
+              at Route.dispatch (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:117:3)
+              at handle (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:435:11)
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at /home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:295:15
+              at param (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:600:14)
+              at param (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:610:14)
+              at processParams (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:664:3)
+    }
+[11:24:26.895] [31mERROR[39m (2261): [36mUnhandled error[39m
+    err: {
+      "type": "DrizzleQueryError",
+      "message": "Failed query: insert into \"account_backup_codes\" (\"id\", \"account_id\", \"code_ciphertext\", \"created_at\") values (default, $1, $2, default), (default, $3, $4, default)\nparams: f356287d-bf84-4b07-ad22-e26f2afa06a4,00j9kJVzShsnUqHtnnFe29XKEJMjA4Mmz/UmFzDzIuWJ,f356287d-bf84-4b07-ad22-e26f2afa06a4,FjQSG/l9ZUfE0v/6U32uyyxuEV4+eQyEkPgWDRGiWUQJ: account backup code insert rejected by test trigger",
+      "stack":
+          Error: Failed query: insert into "account_backup_codes" ("id", "account_id", "code_ciphertext", "created_at") values (default, $1, $2, default), (default, $3, $4, default)
+          params: f356287d-bf84-4b07-ad22-e26f2afa06a4,00j9kJVzShsnUqHtnnFe29XKEJMjA4Mmz/UmFzDzIuWJ,f356287d-bf84-4b07-ad22-e26f2afa06a4,FjQSG/l9ZUfE0v/6U32uyyxuEV4+eQyEkPgWDRGiWUQJ
+              at NodePgPreparedQuery.queryWithCache (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/pg-core/session.js:41:15)
+              at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+              at async insertBackupCodes (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:449:5)
+              at async file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:516:7
+              at async NodePgSession.transaction (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:186:22)
+              at async createAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:190:20)
+          caused by: error: account backup code insert rejected by test trigger
+              at /home/runner/workspace/node_modules/.pnpm/pg@8.22.0/node_modules/pg/lib/client.js:652:17
+              at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+              at async file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:113:20
+              at async NodePgPreparedQuery.queryWithCache (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/pg-core/session.js:39:16)
+              at async insertBackupCodes (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:449:5)
+              at async file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:516:7
+              at async NodePgSession.transaction (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:186:22)
+              at async createAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:190:20)
+      "query": "insert into \"account_backup_codes\" (\"id\", \"account_id\", \"code_ciphertext\", \"created_at\") values (default, $1, $2, default), (default, $3, $4, default)",
+      "params": [
+        "f356287d-bf84-4b07-ad22-e26f2afa06a4",
+        "00j9kJVzShsnUqHtnnFe29XKEJMjA4Mmz/UmFzDzIuWJ",
+        "f356287d-bf84-4b07-ad22-e26f2afa06a4",
+        "FjQSG/l9ZUfE0v/6U32uyyxuEV4+eQyEkPgWDRGiWUQJ"
+      ]
+    }
+✔ Create Account handler (5335.169968ms)
+▶ Account mutation routes are disabled
+  ✔ POST /games/:gameId/accounts returns 403 and writes nothing (53.771118ms)
+  ✔ PATCH /accounts/:id returns 403 and writes nothing (32.602538ms)
+  ✔ PATCH /accounts/:id/status-override returns 403 and writes nothing (24.557543ms)
+  ✔ DELETE /accounts/:id returns 403 and writes nothing (23.896265ms)
+  ✔ GET /games/:gameId/accounts returns only non-secret account fields (25.020003ms)
+✔ Account mutation routes are disabled (4672.28859ms)
+▶ Set Account Status Override handler
+  ✔ public PATCH /accounts/:id/status-override returns 403 and writes nothing (70.056346ms)
+  ✔ SOLD override succeeds and returns the recalculated status (53.784279ms)
+  ✔ INACTIVE override succeeds and returns the recalculated status (21.956621ms)
+  ✔ null clears the override and restores the derived status (29.754845ms)
+  ✔ AVAILABLE and PARTIALLY_SOLD are rejected (15.398788ms)
+  ✔ rejects unknown fields (16.024967ms)
+  ✔ returns 404 for missing or deleted Account (19.596834ms)
+  ✔ Capacities remain unchanged (20.851286ms)
+  ✔ derived status is correct after clearing (22.658564ms)
+✔ Set Account Status Override handler (5875.814465ms)
+▶ Read-only Account API
+  ✔ GET /games/:gameId/accounts returns an empty list for a game with no accounts (40.128434ms)
+  ✔ GET /games/:gameId/accounts returns multiple accounts in stable order (51.824565ms)
+  ✔ GET /games/:gameId/accounts excludes deleted accounts (30.892452ms)
+  ✔ GET /games/:gameId/accounts returns GAME_NOT_FOUND for missing or deleted games (4.837263ms)
+  ✔ GET /accounts/:id returns safe Account detail with capacities (15.185444ms)
+  ✔ GET /accounts/:id returns ACCOUNT_NOT_FOUND for missing or deleted accounts (17.976863ms)
+  ✔ GET /accounts/:id/capacities returns safe capacities and derived status (19.672018ms)
+  ✔ statusOverride INACTIVE returns INACTIVE (21.540361ms)
+  ✔ statusOverride SOLD returns SOLD (21.953637ms)
+  ✔ all capacities finished returns SOLD (20.927126ms)
+  ✔ no finished capacity and no customer relation returns AVAILABLE (15.88762ms)
+  ✔ one active capacity_customers relation returns PARTIALLY_SOLD (21.661602ms)
+  ✔ one finished capacity while others remain unfinished returns PARTIALLY_SOLD (14.196405ms)
+  ✔ historical/deleted capacity_customers relations do not affect status (20.22719ms)
+  ✔ capacity_customers row counts remain unchanged after read-only requests (23.084842ms)
+  ✔ Account mutation routes remain disabled and do not write data (12.267734ms)
+✔ Read-only Account API (5345.004223ms)
+▶ Update Account handler
+  ✔ public PATCH /accounts/:id returns 403 and writes nothing (187.572764ms)
+  ✔ updates non-sensitive fields and returns safe AccountDetailResponse (41.367662ms)
+  ✔ updates sensitive fields and re-encrypts them (29.941487ms)
+  ✔ omitted fields remain unchanged (26.43323ms)
+  ✔ rejects immutable and unknown fields (29.505505ms)
+  ✔ rejects empty and confirmed-only bodies (15.930886ms)
+  ✔ rejects invalid UUID, email, and birthDate (18.73038ms)
+  ✔ returns 404 for missing or deleted Account (20.035348ms)
+  ✔ returns duplicate warning against another Account with zero writes (26.969791ms)
+  ✔ does not warn when updating to the same Account's own values (31.646811ms)
+  ✔ confirmed duplicate succeeds and allows the update (21.826046ms)
+  ✔ fails closed and rolls back when encryption key is missing (22.994485ms)
+  ✔ fails closed and rolls back when encryption key is invalid (23.0677ms)
+  ✔ fails closed and rolls back all writes when the database update fails (36.924798ms)
+  ✔ keeps Backup Codes and Capacities unchanged (21.146406ms)
+  ✔ keeps identifiers unchanged (22.955357ms)
+  ✔ response contains no secrets (18.764588ms)
+[11:24:50.276] [31mERROR[39m (2706): [36mEncryption configuration error during account update[39m
+    err: {
+      "type": "EncryptionError",
+      "message": "PLAYSYNCER_ACCOUNT_MASTER_KEY is not set",
+      "stack":
+          AccountDomainError: PLAYSYNCER_ACCOUNT_MASTER_KEY is not set
+              at loadAccountMasterKey (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:146:11)
+              at updateAccount (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:678:16)
+              at updateAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:245:26)
+              at file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.update.test.ts:64:5
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at next (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:157:13)
+              at Route.dispatch (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:117:3)
+              at handle (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:435:11)
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at /home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:295:15
+      "name": "AccountDomainError"
+    }
+[11:24:50.296] [31mERROR[39m (2706): [36mEncryption configuration error during account update[39m
+    err: {
+      "type": "EncryptionError",
+      "message": "PLAYSYNCER_ACCOUNT_MASTER_KEY must be 32 bytes after Base64 decoding, got 5",
+      "stack":
+          AccountDomainError: PLAYSYNCER_ACCOUNT_MASTER_KEY must be 32 bytes after Base64 decoding, got 5
+              at loadAccountMasterKey (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:166:11)
+              at updateAccount (file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:678:16)
+              at updateAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:245:26)
+              at file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.update.test.ts:64:5
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at next (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:157:13)
+              at Route.dispatch (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/route.js:117:3)
+              at handle (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:435:11)
+              at Layer.handleRequest (/home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/lib/layer.js:152:17)
+              at /home/runner/workspace/node_modules/.pnpm/router@2.2.0/node_modules/router/index.js:295:15
+      "name": "AccountDomainError"
+    }
+[11:24:50.331] [31mERROR[39m (2706): [36mUnhandled error[39m
+    err: {
+      "type": "DrizzleQueryError",
+      "message": "Failed query: update \"accounts\" set \"psn_email_encrypted\" = $1, \"psn_email_lookup_hash\" = $2, \"online_id\" = $3, \"birth_date\" = $4, \"updated_at\" = $5 where \"accounts\".\"id\" = $6\nparams: 0OBxhQIwB+M+Egay82NapHe/M6PPIQ5fyLWatCYiCXd+zZ48BHD1nnw5XVLMKO1f7piKwh6Q,7a1c2b934bea4ec048ad5c35d4867b1a3a530a2d72787807b96cc46a27659dae,DbFailureOnlineId1784460290327_73_7pc7f,1993-03-03,2026-07-19T11:24:50.330Z,67827005-38f7-4ee4-912b-986fabb7c7de: forced update failure",
+      "stack":
+          Error: Failed query: update "accounts" set "psn_email_encrypted" = $1, "psn_email_lookup_hash" = $2, "online_id" = $3, "birth_date" = $4, "updated_at" = $5 where "accounts"."id" = $6
+          params: 0OBxhQIwB+M+Egay82NapHe/M6PPIQ5fyLWatCYiCXd+zZ48BHD1nnw5XVLMKO1f7piKwh6Q,7a1c2b934bea4ec048ad5c35d4867b1a3a530a2d72787807b96cc46a27659dae,DbFailureOnlineId1784460290327_73_7pc7f,1993-03-03,2026-07-19T11:24:50.330Z,67827005-38f7-4ee4-912b-986fabb7c7de
+              at NodePgPreparedQuery.queryWithCache (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/pg-core/session.js:41:15)
+              at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+              at async file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:783:7
+              at async NodePgSession.transaction (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:186:22)
+              at async updateAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:245:20)
+          caused by: error: forced update failure
+              at /home/runner/workspace/node_modules/.pnpm/pg@8.22.0/node_modules/pg/lib/client.js:652:17
+              at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+              at async file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:113:20
+              at async NodePgPreparedQuery.queryWithCache (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/pg-core/session.js:39:16)
+              at async file:///home/runner/workspace/artifacts/api-server/src/services/account/index.ts:783:7
+              at async NodePgSession.transaction (file:///home/runner/workspace/node_modules/.pnpm/drizzle-orm@0.45.2_@types+pg@8.20.0_pg@8.22.0/node_modules/drizzle-orm/node-postgres/session.js:186:22)
+              at async updateAccountHandler (file:///home/runner/workspace/artifacts/api-server/src/routes/accounts.ts:245:20)
+      "query": "update \"accounts\" set \"psn_email_encrypted\" = $1, \"psn_email_lookup_hash\" = $2, \"online_id\" = $3, \"birth_date\" = $4, \"updated_at\" = $5 where \"accounts\".\"id\" = $6",
+      "params": [
+        "0OBxhQIwB+M+Egay82NapHe/M6PPIQ5fyLWatCYiCXd+zZ48BHD1nnw5XVLMKO1f7piKwh6Q",
+        "7a1c2b934bea4ec048ad5c35d4867b1a3a530a2d72787807b96cc46a27659dae",
+        "DbFailureOnlineId1784460290327_73_7pc7f",
+        "1993-03-03",
+        "2026-07-19T11:24:50.330Z",
+        "67827005-38f7-4ee4-912b-986fabb7c7de"
+      ]
+    }
+✔ Update Account handler (5518.631233ms)
+▶ Games API
+  ✔ creates a game successfully (35.88466ms)
+  ✔ created Game returns a valid UUID and is retrievable by GET /games/:id (13.063069ms)
+  ✔ created Game appears in GET /games (14.447858ms)
+  ✔ normal POST /games validation/conflict failures never return 404 (24.605168ms)
+  ✔ rejects duplicate normalized titles (17.29577ms)
+  ✔ rejects whitespace-only titles on create (2.547109ms)
+  ✔ rejects whitespace-only titles on update (17.83034ms)
+  ✔ collapses repeated internal spaces in the stored title (4.717982ms)
+  ✔ rejects invalid UUID with 400 (1.893844ms)
+  ✔ returns 404 for missing game (3.494845ms)
+  ✔ allows platform change without account history (13.927254ms)
+  ✔ blocks platform change with active account history (47.826307ms)
+  ✔ allows same-platform update when an account exists (34.417132ms)
+  ✔ blocks platform change with a soft-deleted account (50.034099ms)
+  ✔ changes status from ACTIVE to INACTIVE (18.943077ms)
+  ✔ allows hard delete without history (17.440825ms)
+  ✔ blocks hard delete with active account history (24.950773ms)
+  ✔ blocks hard delete with a soft-deleted account (48.466892ms)
+  ✔ enforces global normalized-title uniqueness across soft-deleted games (40.312052ms)
+  ✔ lists all games including inactive ones (31.411651ms)
+✔ Games API (4576.816927ms)
+▶ Account Domain Service
+  ✔ creates a valid account (55.12039ms)
+  ✔ trims and lowercases emails for storage (22.365675ms)
+  ✔ trims Online ID but preserves its entered case (18.119217ms)
+  ✔ rejects invalid birth date formats and impossible dates (14.469124ms)
+  ✔ rejects empty or whitespace-only backup codes (6.912202ms)
+  ✔ rejects account creation for an inactive game (4.689741ms)
+  ✔ rejects statusOverride through strict input contract (3.728996ms)
+  ✔ fails closed when PLAYSYNCER_ACCOUNT_MASTER_KEY is missing or invalid (3.744171ms)
+  ✔ encrypts credentials and decrypts them back to the original values (16.650707ms)
+  ✔ two encryptions of the same value produce different ciphertext (0.80169ms)
+  ✔ returns a duplicate warning and writes nothing when duplicates exist (25.610224ms)
+  ✔ detects duplicates case-insensitively for emails and Online ID (18.702258ms)
+  ✔ creates an account when confirmed despite duplicates (20.450893ms)
+  ✔ returns only safe, non-secret fields in the result (13.002504ms)
+  ✔ rolls back all writes when Account creation fails (5.058136ms)
+  ✔ rolls back all writes when Backup Code insert fails due to database trigger (31.31386ms)
+  ✔ creates correct capacity rows with exact kind and instanceNo tuples for all platforms (38.124889ms)
+  ✔ allocates distinct identifiers for two concurrent creations (22.886898ms)
+  ✔ concurrent identical unconfirmed requests produce one creation and one warning (18.164679ms)
+  ✔ identifiers from a created and deleted account are not reused (17.341974ms)
+  ✔ invalid birth dates do not throw RangeError (4.115687ms)
+  ✔ returns IdentifierConflictError when forced per-game sequence collision occurs (23.324575ms)
+  ✔ duplicate advisory lock tokens do not cause incorrect behavior (8.664441ms)
+✔ Account Domain Service (4225.941611ms)
+ℹ tests 126
+ℹ suites 9
+ℹ pass 126
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 42316.993898
+Exit code: 0
+Duration: 43s
+
+===== pnpm --filter @workspace/api-server run build =====
+Command: pnpm --filter @workspace/api-server run build
+
+> @workspace/api-server@0.0.0 build /home/runner/workspace/artifacts/api-server
+> node ./build.mjs
+
+
+  dist/index.mjs                       1.8mb ⚠️
+  dist/pino-worker.mjs               153.4kb
+  dist/pino-file.mjs                 142.1kb
+  dist/pino-pretty.mjs               114.6kb
+  dist/thread-stream-worker.mjs        7.3kb
+  dist/index.mjs.map                   3.1mb
+  dist/pino-worker.mjs.map           256.9kb
+  dist/pino-file.mjs.map             229.0kb
+  dist/pino-pretty.mjs.map           204.0kb
+  dist/thread-stream-worker.mjs.map   12.0kb
+
+⚡ Done in 296ms
+Exit code: 0
+Duration: 1s
+
+===== pnpm --filter @workspace/db run test =====
+Command: pnpm --filter @workspace/db run test
+
+> @workspace/db@0.0.0 test /home/runner/workspace/lib/db
+> node --test src/helpers/*.test.ts
+
+▶ buildCapacityDefinitions
+  ✔ PS5_ONLY returns two Z2_PS5 slots and one shared Z3 (0.887264ms)
+  ✔ PS4_ONLY returns one Z2_PS4 slot and one shared Z3 (0.168953ms)
+  ✔ PS4_AND_PS5 returns two Z2_PS5, one Z2_PS4, and one shared Z3 (0.195726ms)
+✔ buildCapacityDefinitions (1.984427ms)
+▶ cleanGameTitle
+  ✔ trims surrounding whitespace (0.553328ms)
+  ✔ collapses repeated internal whitespace to one space (0.149537ms)
+  ✔ preserves display casing (0.119241ms)
+  ✔ collapses tabs and newlines (0.075443ms)
+✔ cleanGameTitle (1.650239ms)
+▶ normalizeGameTitle
+  ✔ trims surrounding whitespace (0.24654ms)
+  ✔ collapses repeated internal whitespace to one space (0.079489ms)
+  ✔ lowercases for case-insensitive duplicate detection (0.134311ms)
+  ✔ makes equivalent titles collide (1.132541ms)
+  ✔ keeps distinct editions distinct (0.151298ms)
+✔ normalizeGameTitle (1.999639ms)
+▶ prepareGameTitle
+  ✔ returns cleaned display and normalized title (0.215682ms)
+  ✔ throws GameTitleError for whitespace-only input (0.394745ms)
+  ✔ throws GameTitleError for title over 120 characters (0.098237ms)
+  ✔ accepts a 120-character cleaned title (0.080469ms)
+✔ prepareGameTitle (0.905857ms)
+ℹ tests 16
+ℹ suites 4
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 191.415187
+Exit code: 0
+Duration: 0s
+
+===== pnpm --filter @workspace/db run test:migrations =====
+Command: pnpm --filter @workspace/db run test:migrations
+
+> @workspace/db@0.0.0 test:migrations /home/runner/workspace/lib/db
+> node --test --test-concurrency=1 src/migrations/*.test.ts
+
+▶ PS-03C1 additive schema
+  ✔ disposable database is not the active workspace database (10.247831ms)
+  ✔ disposable migration history matches expected hashes (1.83823ms)
+  ✔ global account_code sequence produces increasing non-reused values (6.888604ms)
+  ✔ rolled-back transaction does not reuse a global sequence value (2.760732ms)
+  ✔ per-game counter allocation increments atomically (12.920805ms)
+  ✔ concurrent per-game counter allocations produce distinct sequential values (43.173992ms)
+  ✔ different Games have independent per-game counters (10.786709ms)
+  ✔ deleting an Account does not reset or reuse its per-game sequence number (20.270115ms)
+  ✔ concurrent first per-game counter allocations when no row exists (12.66685ms)
+  ✔ two different Games begin per-game counters independently (12.87378ms)
+  ✔ deleted Account with allocated sequence does not reuse its per-game sequence number (16.561343ms)
+  ✔ unique (game_id, account_number_seq) is enforced (11.13355ms)
+  ✔ unique (game_id, display_number) is enforced (9.44133ms)
+  ✔ duplicate PSN Email lookup hashes remain allowed (8.83099ms)
+  ✔ duplicate Family Management Email lookup hashes remain allowed (10.220278ms)
+  ✔ duplicate Online ID values remain allowed (10.63192ms)
+  ✔ identifier update trigger blocks actual identifier changes (6.661413ms)
+  ✔ identifier update trigger permits unrelated Account updates (9.71251ms)
+  ✔ identifier update trigger permits identical-value updates (12.365427ms)
+  ✔ Capacity FINISHED consistency accepts valid states (13.533602ms)
+  ✔ Capacity FINISHED consistency rejects contradictory states (7.872842ms)
+  ✔ Backup Code lifecycle enum accepts only approved values (16.870586ms)
+  ✔ manual Account override accepts only SOLD, INACTIVE or NULL (18.596791ms)
+  ✔ new shared Z3 representation accepts Z3_SHARED_PS5_PS4 (8.460629ms)
+  ✔ legacy columns and enum values remain present (8.927303ms)
+  ✔ rollback restores schema to post-0001 state (2304.706251ms)
+✔ PS-03C1 additive schema (4503.69383ms)
+▶ PS-03C2B retirement migration
+  ✔ disposable database is not the active workspace database (13.288954ms)
+  ✔ migration history contains all four approved migrations (2.503268ms)
+  ✔ legacy Account columns and enums are removed (7.686074ms)
+  ✔ legacy Backup Code columns and enums are removed (3.477164ms)
+  ✔ legacy Capacity column and enum are removed (3.189255ms)
+  ✔ Backup Code has exactly four columns (2.714557ms)
+  ✔ capacity_kind_v2 is NOT NULL (2.338418ms)
+  ✔ Capacity unique index is unconditional (3.20655ms)
+  ✔ preserved Account objects remain (4.316606ms)
+  ✔ preserved game_account_sequences and identifier constraints remain (2.220271ms)
+  ✔ migration 0003 does not affect games or capacity_customers (4.064635ms)
+  ✔ final schema accepts valid Account, Capacity, and Backup Code rows (15.428435ms)
+✔ PS-03C2B retirement migration (1417.563296ms)
+ℹ tests 38
+ℹ suites 2
+ℹ pass 38
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6289.259495
+Exit code: 0
+Duration: 7s
+
+===== pnpm --filter @workspace/playsyncer run test =====
+Command: pnpm --filter @workspace/playsyncer run test
+
+> @workspace/playsyncer@0.0.0 test /home/runner/workspace/artifacts/playsyncer
+> vitest run --config vitest.config.ts
+
+
+ RUN  v3.2.7 /home/runner/workspace/artifacts/playsyncer
+
+ ✓ src/pages/GameDetailPage.test.tsx (13 tests) 276ms
+ ✓ src/components/AccountCardReadOnly.test.tsx (15 tests) 195ms
+ ✓ src/components/AccountDetailsReadOnly.test.tsx (13 tests) 163ms
+ ✓ src/components/AccountStatusBadge.test.tsx (6 tests) 43ms
+
+ Test Files  4 passed (4)
+      Tests  47 passed (47)
+   Start at  11:25:11
+   Duration  5.86s (transform 330ms, setup 898ms, collect 1.15s, tests 676ms, environment 1.97s, prepare 433ms)
+
+Exit code: 0
+Duration: 8s
+
+===== PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build =====
+Command: PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build
+
+> @workspace/playsyncer@0.0.0 build /home/runner/workspace/artifacts/playsyncer
+> vite build --config vite.config.ts
+
+vite v7.3.5 building client environment for production...
+transforming...
+src/components/ui/sonner.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+✓ 1768 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/public/index.html                                               0.67 kB │ gzip:   0.43 kB
+dist/public/assets/vazirmatn-latin-ext-wght-normal-tDTa1Fj6.woff2   21.86 kB
+dist/public/assets/vazirmatn-latin-wght-normal-BFexNX-K.woff2       34.52 kB
+dist/public/assets/vazirmatn-arabic-wght-normal-Cafbb7Zc.woff2      46.31 kB
+dist/public/assets/index-DTiVzw_s.css                              114.39 kB │ gzip:  18.65 kB
+dist/public/assets/index-CinkTXNR.js                               400.43 kB │ gzip: 120.41 kB
+✓ built in 3.42s
+Exit code: 0
+Duration: 4s
+
+===== git diff --check =====
+Command: git diff --check
+Exit code: 0
+Duration: 1s
+
+===== Summary =====
+pnpm install --frozen-lockfile:0
+pnpm --filter @workspace/api-spec run codegen:0
+pnpm run typecheck:0
+pnpm --filter @workspace/api-server run typecheck:0
+pnpm --filter @workspace/api-server run test:0
+pnpm --filter @workspace/api-server run build:0
+pnpm --filter @workspace/db run test:0
+pnpm --filter @workspace/db run test:migrations:0
+pnpm --filter @workspace/playsyncer run test:0
+PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build:0
+git diff --check:0

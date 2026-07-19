@@ -8,14 +8,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { errorHandler } from "../middlewares/error-handler.ts";
-import { updateAccountHandler, createAccountHandler } from "./accounts.ts";
 import { p } from "../lib/req-param.ts";
 import { decrypt } from "../lib/crypto.ts";
-import {
-  loadAccountMasterKey,
-  createAccount as createAccountService,
-  updateAccount as updateAccountService,
-} from "../services/account/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, "..", "..", "dist");
@@ -24,6 +18,12 @@ const TEST_MASTER_KEY = Buffer.from(
   "0123456789abcdef0123456789abcdef",
   "utf8",
 ).toString("base64");
+
+let createAccountHandler: typeof import("./accounts.ts")["createAccountHandler"];
+let updateAccountHandler: typeof import("./accounts.ts")["updateAccountHandler"];
+let loadAccountMasterKey: typeof import("../services/account/index.ts")["loadAccountMasterKey"];
+let createAccountService: typeof import("../services/account/index.ts")["createAccount"];
+let updateAccountService: typeof import("../services/account/index.ts")["updateAccount"];
 
 let idCounter = 0;
 function nextId(): string {
@@ -85,6 +85,17 @@ describe("Update Account handler", { concurrency: 1 }, () => {
 
     process.env.DATABASE_URL = databaseUrl;
     process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = TEST_MASTER_KEY;
+
+    // Load modules that depend on @workspace/db only after the disposable test
+    // database URL is set, so the production DB connection architecture is not
+    // modified to accommodate tests.
+    const accountsModule = await import("./accounts.ts");
+    createAccountHandler = accountsModule.createAccountHandler;
+    updateAccountHandler = accountsModule.updateAccountHandler;
+    const serviceModule = await import("../services/account/index.ts");
+    loadAccountMasterKey = serviceModule.loadAccountMasterKey;
+    createAccountService = serviceModule.createAccount;
+    updateAccountService = serviceModule.updateAccount;
 
     execSync("pnpm run build", {
       cwd: path.resolve(__dirname, "..", ".."),
@@ -197,6 +208,32 @@ describe("Update Account handler", { concurrency: 1 }, () => {
       .where(eq(db.accountsTable.id, accountId))
       .limit(1);
     return row;
+  }
+
+  async function installUpdateFailureTrigger() {
+    await db.db.execute(sql`
+      CREATE OR REPLACE FUNCTION force_update_failure()
+      RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'forced update failure';
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await db.db.execute(sql`
+      CREATE TRIGGER force_update_failure_trigger
+      BEFORE UPDATE ON accounts
+      FOR EACH ROW
+      EXECUTE FUNCTION force_update_failure();
+    `);
+  }
+
+  async function removeUpdateFailureTrigger() {
+    await db.db.execute(sql`
+      DROP TRIGGER IF EXISTS force_update_failure_trigger ON accounts;
+    `);
+    await db.db.execute(sql`
+      DROP FUNCTION IF EXISTS force_update_failure();
+    `);
   }
 
   it("public PATCH /accounts/:id returns 403 and writes nothing", async () => {
@@ -528,6 +565,120 @@ describe("Update Account handler", { concurrency: 1 }, () => {
     } finally {
       process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
     }
+  });
+
+  it("fails closed and rolls back when encryption key is invalid", async () => {
+    const game = await createGame("Update Invalid Key Game");
+    const accountId = await createAccount(game.id);
+    const before = await getRowCounts();
+    const beforeRow = await loadAccountRow(accountId);
+    const beforeCapacities = await getAccountCapacities(accountId);
+    const beforeBackupCodes = await getBackupCodes(accountId);
+
+    const original = process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY;
+    // "aGVsbG8=" is the Base64 encoding of "hello" (5 bytes) — wrong length.
+    process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = "aGVsbG8=";
+    try {
+      const res = await fetch(updateUrl(accountId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          psnEmail: "invalid-key-psn@example.com",
+          onlineId: `InvalidKeyOnlineId${nextId()}`,
+          birthDate: "1992-02-02",
+        }),
+      });
+      assert.strictEqual(res.status, 500);
+      const data = (await res.json()) as { error: string; code: string };
+      // The handler maps EncryptionError to the canonical Persian INTERNAL_ERROR
+      // message while keeping the code machine-readable.
+      assert.strictEqual(data.error, "خطای داخلی رخ داد");
+      assert.strictEqual(data.code, "INTERNAL_ERROR");
+      assertNoSecrets(JSON.stringify(data));
+    } finally {
+      process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY = original;
+    }
+
+    const after = await getRowCounts();
+    assert.strictEqual(after.accounts, before.accounts);
+    assert.strictEqual(after.capacities, before.capacities);
+    assert.strictEqual(after.backupCodes, before.backupCodes);
+
+    const afterRow = await loadAccountRow(accountId);
+    assert.strictEqual(afterRow.psnEmailEncrypted, beforeRow.psnEmailEncrypted);
+    assert.strictEqual(afterRow.onlineId, beforeRow.onlineId);
+    assert.strictEqual(afterRow.birthDate, beforeRow.birthDate);
+    assert.strictEqual(afterRow.accountCode, beforeRow.accountCode);
+    assert.strictEqual(afterRow.displayNumber, beforeRow.displayNumber);
+    assert.strictEqual(afterRow.accountNumberPrefix, beforeRow.accountNumberPrefix);
+    assert.strictEqual(afterRow.accountNumberSeq, beforeRow.accountNumberSeq);
+    assert.strictEqual(afterRow.gameId, beforeRow.gameId);
+
+    const afterCapacities = await getAccountCapacities(accountId);
+    const afterBackupCodes = await getBackupCodes(accountId);
+    assert.deepStrictEqual(
+      afterCapacities.map((c) => c.id),
+      beforeCapacities.map((c) => c.id),
+    );
+    assert.deepStrictEqual(
+      afterBackupCodes.map((c) => c.id),
+      beforeBackupCodes.map((c) => c.id),
+    );
+  });
+
+  it("fails closed and rolls back all writes when the database update fails", async () => {
+    const game = await createGame("Update DB Failure Game");
+    const accountId = await createAccount(game.id);
+    const before = await getRowCounts();
+    const beforeRow = await loadAccountRow(accountId);
+    const beforeCapacities = await getAccountCapacities(accountId);
+    const beforeBackupCodes = await getBackupCodes(accountId);
+
+    await installUpdateFailureTrigger();
+    try {
+      const res = await fetch(updateUrl(accountId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          psnEmail: "db-failure-psn@example.com",
+          onlineId: `DbFailureOnlineId${nextId()}`,
+          birthDate: "1993-03-03",
+        }),
+      });
+      assert.strictEqual(res.status, 500);
+      const data = (await res.json()) as { error: string; code: string };
+      assert.strictEqual(data.error, "Internal server error");
+      assert.strictEqual(data.code, "INTERNAL_ERROR");
+      assertNoSecrets(JSON.stringify(data));
+    } finally {
+      await removeUpdateFailureTrigger();
+    }
+
+    const after = await getRowCounts();
+    assert.strictEqual(after.accounts, before.accounts);
+    assert.strictEqual(after.capacities, before.capacities);
+    assert.strictEqual(after.backupCodes, before.backupCodes);
+
+    const afterRow = await loadAccountRow(accountId);
+    assert.strictEqual(afterRow.psnEmailEncrypted, beforeRow.psnEmailEncrypted);
+    assert.strictEqual(afterRow.onlineId, beforeRow.onlineId);
+    assert.strictEqual(afterRow.birthDate, beforeRow.birthDate);
+    assert.strictEqual(afterRow.accountCode, beforeRow.accountCode);
+    assert.strictEqual(afterRow.displayNumber, beforeRow.displayNumber);
+    assert.strictEqual(afterRow.accountNumberPrefix, beforeRow.accountNumberPrefix);
+    assert.strictEqual(afterRow.accountNumberSeq, beforeRow.accountNumberSeq);
+    assert.strictEqual(afterRow.gameId, beforeRow.gameId);
+
+    const afterCapacities = await getAccountCapacities(accountId);
+    const afterBackupCodes = await getBackupCodes(accountId);
+    assert.deepStrictEqual(
+      afterCapacities.map((c) => c.id),
+      beforeCapacities.map((c) => c.id),
+    );
+    assert.deepStrictEqual(
+      afterBackupCodes.map((c) => c.id),
+      beforeBackupCodes.map((c) => c.id),
+    );
   });
 
   it("keeps Backup Codes and Capacities unchanged", async () => {

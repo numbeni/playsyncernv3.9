@@ -1,0 +1,188 @@
+Continue in the current PlaySyncer workspace.
+
+Perform only:
+
+PS-03D5-4-F1 — Scope, Test Isolation, Rollback Evidence, and Full Validation Correction
+
+This is a correction pass, not a restart.
+
+Preserve all correct PS-03D5-4 OpenAPI, generated-client, service, handler, route-disable, and test work.
+
+Do not reimplement completed functionality.
+Do not start PS-03D5-5.
+Do not commit yet.
+
+## 1. Remove the unauthorized production DB-module change
+
+Restore:
+
+lib/db/src/index.ts
+
+exactly to its PS-03D5-3 baseline behavior.
+
+Remove the new lazy Pool/Drizzle initialization and Proxy implementation.
+
+PS-03D5-4 must not change the production database connection architecture or fail-fast behavior.
+
+Do not replace it with another production refactor.
+
+## 2. Fix test isolation only inside test code
+
+The integration tests must set the disposable test DATABASE_URL before importing modules that initialize @workspace/db.
+
+Use the smallest test-only correction, such as dynamic imports inside the test setup after:
+
+- startTestPg() completes
+- process.env.DATABASE_URL is set
+- process.env.PLAYSYNCER_ACCOUNT_MASTER_KEY is set
+
+Do not connect tests to the Replit workspace database.
+
+Do not modify production DB initialization to accommodate tests.
+
+Apply this only where required in the new PS-03D5-4 tests.
+
+## 3. Complete missing rollback evidence
+
+Inspect existing tests first and do not duplicate coverage.
+
+Add the minimum deterministic tests still missing:
+
+### Database failure rollback
+
+Force a database failure during an Account update using the disposable test PostgreSQL database, preferably with a temporary test-only trigger or another isolated database mechanism.
+
+Verify after failure:
+
+- Account editable fields remain unchanged
+- immutable Account identifiers remain unchanged
+- Account Capacities remain unchanged
+- Account Backup Codes remain unchanged
+- HTTP response is the canonical safe 500 error
+- no SQL or internal error details leak
+
+The temporary fault mechanism must be removed during test cleanup.
+
+### Encryption failure evidence
+
+Keep the existing missing-key test.
+
+Add focused evidence for an invalid encryption configuration or deterministic encryption failure and verify:
+
+- HTTP 500 + INTERNAL_ERROR
+- no Account field changes
+- no Capacity changes
+- no Backup Code changes
+- no secret or internal error details leak
+
+Do not add production feature flags or broad dependency injection solely for this test.
+
+## 4. Preserve the approved implementation
+
+Confirm that:
+
+- PATCH /api/accounts/{accountId} remains implemented in OpenAPI
+- PATCH /api/accounts/{accountId}/status-override remains implemented in OpenAPI
+- updateAccountHandler remains exported but unmounted
+- setAccountStatusOverrideHandler remains exported but unmounted
+- both production routes return 403 + ACCOUNT_OPS_DISABLED before validation or writes
+- the frontend remains read-only
+- Create Account behavior remains unchanged
+- schema and migrations remain unchanged
+- Replit infrastructure, Artifact workflows, bootstrap scripts, and ports remain unchanged
+
+## 5. Run the complete required validation suite
+
+Run and report actual exit codes and test counts for every command:
+
+- pnpm install --frozen-lockfile
+- pnpm --filter @workspace/api-spec run codegen
+- pnpm run typecheck
+- pnpm --filter @workspace/api-server run typecheck
+- pnpm --filter @workspace/api-server run test
+- pnpm --filter @workspace/api-server run build
+- pnpm --filter @workspace/db run test
+- pnpm --filter @workspace/db run test:migrations
+- pnpm --filter @workspace/playsyncer run test
+- PORT=24351 BASE_PATH=/ pnpm --filter @workspace/playsyncer run build
+- git diff --check
+
+Do not omit any command.
+
+If a command fails, report and correct only failures caused by PS-03D5-4.
+
+## 6. Review artifacts
+
+Create:
+
+- reports/ps03d5-4-f1-correction-report.md
+- reports/ps03d5-4-f1-correction.diff
+- reports/ps03d5-4-f1-correction-manifest.txt
+- reports/ps03d5-4-f1-validation.txt
+- playsyncer-ps03d5-4-f1-review.zip
+
+The ZIP must contain the complete current PlaySyncer source, not only changed files.
+
+Exclude only:
+
+- .git
+- node_modules
+- dist
+- build
+- coverage
+- caches
+- database files
+- .env files
+- Secrets
+- attached_assets/Pasted-*
+- old or nested ZIP files
+- logs
+- PID files
+
+## 7. Documentation
+
+Keep docs/CURRENT_PHASE.md at:
+
+Current stage:
+PS-03D5 — Account Mutation Implementation, Runtime Disabled
+
+Current sub-stage:
+PS-03D5-4 — Update and Status Override Backend, Runtime Disabled
+
+Current status:
+PS-03D5-4 — IMPLEMENTATION COMPLETE, AWAITING SOURCE REVIEW
+
+Next planned sub-stage:
+PS-03D5-5 — Delete Account Safety Boundary
+
+Do not mark PS-03D5-4 approved or closed.
+
+## 8. Final report
+
+Return:
+
+- what was preserved
+- exact corrections made
+- confirmation that lib/db/src/index.ts matches the PS-03D5-3 baseline
+- exact test-isolation solution
+- rollback tests added
+- complete validation results
+- test counts
+- proof both public PATCH routes remain disabled
+- confirmation frontend remains read-only
+- confirmation schema and migrations did not change
+- confirmation Replit infrastructure did not change
+- exact git status
+- complete-source ZIP filename
+- ZIP byte size
+- ZIP SHA-256
+
+Do not commit.
+
+Final status must be exactly one of:
+
+- PS-03D5-4-F1 — CORRECTION COMPLETE, AWAITING SOURCE REVIEW
+- PS-03D5-4-F1 — TEST OR BUILD FAILURE
+- PS-03D5-4-F1 — DATABASE SAFETY BLOCKER
+- PS-03D5-4-F1 — SCOPE VIOLATION
+- PS-03D5-4-F1 — PACKAGING FAILURE
